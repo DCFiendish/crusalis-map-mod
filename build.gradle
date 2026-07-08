@@ -1,0 +1,76 @@
+plugins {
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = "Xaeros Fairplay Nation Overlay"
+}
+
+repositories {
+	maven { url "https://maven.fabricmc.net/" }
+	maven { url "https://api.modrinth.com/maven" }
+	maven { url "https://chocolateminecraft.com/maven" }
+}
+
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"aechronis-map-mod" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	modImplementation "maven.modrinth:xaeroplus:2.30.10+fabric-1.21.11"
+	modCompileOnly "xaero.map:xaeroworldmap-fabric-1.21.11:1.40.11"
+	modCompileOnly "xaero.minimap:xaerominimap-fabric-1.21.11:25.3.10"
+	modCompileOnly files("libs/xaerolib-1.1.0-ab30ae2ca666ba3a.jar")
+	modCompileOnly files("libs/xaerolib-1.1.15-8d2180f17290a347.jar")
+	modImplementation "maven.modrinth:cloth-config:19.0.147+fabric"
+	modImplementation "maven.modrinth:modmenu:15.0.0"
+}
+
+processResources {
+	inputs.property "version", project.version
+	filesMatching("fabric.mod.json") {
+		expand "version": inputs.properties.version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+	inputs.property "projectName", project.name
+	from("LICENSE") {
+		rename { "${it}_${project.name}" }
+	}
+}
+
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+}
