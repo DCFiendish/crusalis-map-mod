@@ -452,6 +452,21 @@ public class AechronisMapData {
             }
         }
 
+        // Same-nation "capture": occupier and pre-capture owner resolve to the same
+        // nation (one town recapturing/holding territory from another town in its own
+        // nation, or a stale flag the plugin never cleared after an intra-nation
+        // recapture). We color and diagonal by NATION, not by individual town, so this
+        // isn't a real cross-nation war event — both "sides" are the same color. Drop
+        // these from the occupied set entirely rather than render a same-color diagonal
+        // that flags nothing. territoryNation here already holds the OCCUPIER's nation
+        // (just overwritten above); baselineTerritoryNation still holds the pre-capture
+        // nation.
+        newCapturedFromJson.removeIf(tid -> {
+            String occupierNation = territoryNation.get(tid);
+            String ownerNation = baselineTerritoryNation.get(tid);
+            return occupierNation != null && occupierNation.equals(ownerNation);
+        });
+
         // Nation colors read directly from towns.json's authoritative "nations" object —
         // cheap, proportional to nation count (low dozens), not territory/chunk count.
         Map<String, Integer> newNationColors = new HashMap<>();
