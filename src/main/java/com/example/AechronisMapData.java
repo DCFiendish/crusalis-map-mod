@@ -399,6 +399,14 @@ public class AechronisMapData {
             }
         }
 
+        // Snapshot the pre-capture (defending) owner before pass 2 below overwrites
+        // territoryNation with the occupier's nation. Needed to bootstrap territories
+        // that are ALREADY captured the first time we ever see them (see the
+        // lastTerritoryColor bootstrap in the ownership-diff loop further down) —
+        // without this snapshot, that bootstrap would have no way to know who held the
+        // territory before capture, only who currently occupies it.
+        Map<String, String> baselineTerritoryNation = new HashMap<>(territoryNation);
+
         // Player username -> nation (see field javadoc above). Built from each town's
         // authoritative "residents" UUID roster, resolved to names via the top-level
         // "residents" object (uuid -> name). Deliberately NOT using each resident's own
@@ -547,6 +555,24 @@ public class AechronisMapData {
             // owner's color the moment the JSON puts them in the occupier's town.
             // The captured→annexed transition detection block below handles the flip.
             if (newCapturedFromJson.contains(tid)) {
+                // Bootstrap exception: territories that are ALREADY captured the very
+                // first time we ever see them (e.g. "Warzone" territories that cycle
+                // between occupiers and are essentially never NOT captured) never get a
+                // base color from a prior poll's pre-capture state — lastTerritoryColor
+                // has no entry for them, so skipping unconditionally here would leave
+                // their chunk fill blank forever, with only the occupied diagonal ever
+                // rendering. Apply the pre-capture (defending) owner's color once; every
+                // later poll finds lastTerritoryColor already populated and falls through
+                // to the normal skip below, same as any other occupied territory.
+                if (!lastTerritoryColor.containsKey(tid)) {
+                    String baselineNation = baselineTerritoryNation.get(tid);
+                    if (baselineNation != null) {
+                        int bootstrapColor = newNationColors.getOrDefault(baselineNation, rgb(200, 200, 200));
+                        applyTerritoryColor(tid, bootstrapColor);
+                        lastTerritoryColor.put(tid, bootstrapColor);
+                        changedCount++;
+                    }
+                }
                 skippedOccupied++;
                 continue;
             }
