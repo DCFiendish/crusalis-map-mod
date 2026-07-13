@@ -29,27 +29,10 @@ live war visuals during a siege.
 ## Requirements
 
 - Fabric Loader, Fabric API
-- [XaeroPlus](https://modrinth.com/mod/xaeroplus)
-- Xaero's Minimap and Xaero's World Map
+- [XaeroPlus](https://modrinth.com/mod/xaeroplus) 2.30.10+fabric-1.21.11
+- [Xaero's Minimap](https://modrinth.com/mod/xaeros-minimap) 25.3.10
+- [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map) 1.40.11
 - Cloth Config, Mod Menu
-
-## Scope
-
-This mod is built against a specific server's Nodes plugin deployment and map
-endpoints, and its more invasive rendering behavior (see below) was approved
-by that server's admin specifically for that server — it will not activate on
-any other server.
-
-One piece of it is worth calling out explicitly: XaeroPlus gates its own
-advanced draw-tool rendering behind a "fairplay" check on certain servers.
-With the target server admin's explicit approval, this mod bypasses that check
-*only while connected to that specific server* (`AechronisDrawManagerMixin`) so
-XaeroPlus's own tools render there too, alongside this mod's overlay. That
-bypass is scoped in code to the approved server and never applies anywhere
-else — entity radar and cave-mode fairplay enforcement (separate mechanisms)
-are untouched everywhere, per the admin's condition. If you're adapting this
-mod for a different server, get your own admin's sign-off before enabling
-anything equivalent, and keep the scoping intact.
 
 ## Building
 
