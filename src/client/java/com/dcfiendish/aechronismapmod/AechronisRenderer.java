@@ -1,4 +1,4 @@
-package com.example;
+package com.dcfiendish.aechronismapmod;
 
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -20,6 +20,19 @@ import java.util.Map;
 
 public class AechronisRenderer extends Module {
     private static final int  DEFAULT_NODE_COLOR    = 0x000000;
+    // Every overlay element except the nation fill renders fully opaque, always —
+    // opacity is only user-adjustable for the nation fill (see AechronisConfig).
+    private static final int  FULL_ALPHA            = 255;
+
+    // Timeouts for per-chunk war visuals (Version B). War chunks (solid recolor + X
+    // stripe on a freshly-captured chunk) purge after 90s. Under-attack stripes are
+    // cleared by chat events (defeated/explosion) in the normal case; this timeout is
+    // only a backstop for a missed end-message. Checked against the real max attack
+    // duration (FlagWar.kt: chunkAttackTime 200 ticks/10s base × up to 2x wasteland ×
+    // 2x home × per-territory attacker/defender multiplier) — both have comfortable
+    // margin over realistic durations.
+    private static final long WAR_CHUNK_TIMEOUT_MS = 90_000L;
+    private static final long ATTACK_TIMEOUT_MS    = 600_000L;
 
     // Held directly by us, NOT registered with Globals.drawManager.registry() — that
     // registry is gated behind XaeroPlus's fairplay check (HudMod.INSTANCE.isFairPlay()).
@@ -43,13 +56,16 @@ public class AechronisRenderer extends Module {
     private int lastNationLabelCount = -1;
     private Long2ObjectOpenHashMap<Text> cachedPortTexts = new Long2ObjectOpenHashMap<>();
     private int lastPortCount = -1;
-    private Object2IntOpenHashMap<Line> cachedPortConnections = new Object2IntOpenHashMap<>();
-    private int lastPortConnectionCount = -1;
 
     // Track last config state to detect changes
     private int lastNationAlpha      = -1;
-    private int lastBorderAlpha      = -1;
     private boolean lastWhiteBorders = false;
+    // -1 sentinel guarantees the node-border cache actually builds on the very first
+    // call, regardless of mapData.dirty/whiteBorders state — without it, if dirty is
+    // still false and whiteBorders is still its false default on first render (the
+    // common case), neither condition would ever fire and cachedNodeBorders would stay
+    // permanently empty. Real sizes are always >= 0, so -1 can never coincidentally match.
+    private int lastNodeBorderCount  = -1;
 
     public AechronisRenderer(AechronisMapData mapData) {
         this.mapData = mapData;
@@ -88,6 +104,37 @@ public class AechronisRenderer extends Module {
                         1000
                 )
         );
+        // Per-chunk war visuals (Version B) — distinct from the territory-level occupied
+        // diagonal above. WarChunks/WarStripes mark chunks captured within the last 90s
+        // (solid recolor + X); UnderAttackStripes marks chunks with a flag currently
+        // planted (single diagonal in the attacker's nation color). Driven by
+        // AechronisMapData.warChunks/underAttackChunks, populated by AechronisChatListener.
+        ourFeatures.add(
+                DrawFeatureFactory.multiColorChunkHighlights(
+                        "AechronisWarChunks",
+                        this::getWarChunks,
+                        this::getChunkColor,
+                        500
+                )
+        );
+        ourFeatures.add(
+                DrawFeatureFactory.multiColorLines(
+                        "AechronisWarStripes",
+                        this::getWarStripes,
+                        (line, value) -> value,
+                        () -> AechronisConfig.get().warStripeWidth,
+                        500
+                )
+        );
+        ourFeatures.add(
+                DrawFeatureFactory.multiColorLines(
+                        "AechronisUnderAttackStripes",
+                        this::getUnderAttackStripes,
+                        (line, value) -> value,
+                        () -> AechronisConfig.get().underAttackStripeWidth,
+                        500
+                )
+        );
         ourFeatures.add(
                 DrawFeatureFactory.text(
                         "AechronisNodeLabels",
@@ -113,15 +160,6 @@ public class AechronisRenderer extends Module {
                 DrawFeatureFactory.text(
                         "AechronisPortLabels",
                         this::getPortTexts,
-                        2000
-                )
-        );
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorLines(
-                        "AechronisPortConnections",
-                        this::getPortConnections,
-                        (line, value) -> value,
-                        () -> 0.15f,
                         2000
                 )
         );
@@ -168,20 +206,19 @@ public class AechronisRenderer extends Module {
         if (!cfg.showNodeBorders) return new Object2IntOpenHashMap<>();
         if (dimension != ChunkUtils.getActualDimension()) return new Object2IntOpenHashMap<>();
 
-        int alpha = cfg.getNodeBorderAlpha();
         boolean white = cfg.whiteBorders;
-        if (mapData.dirty || alpha != lastBorderAlpha || white != lastWhiteBorders) {
-            rebuildNodeBordersCache(alpha, white);
-            lastBorderAlpha  = alpha;
+        if (mapData.dirty || white != lastWhiteBorders || mapData.nodeBorderLines.size() != lastNodeBorderCount) {
+            rebuildNodeBordersCache(white);
             lastWhiteBorders = white;
+            lastNodeBorderCount = mapData.nodeBorderLines.size();
         }
         return cachedNodeBorders;
     }
 
-    private void rebuildNodeBordersCache(int alpha, boolean white) {
+    private void rebuildNodeBordersCache(boolean white) {
         Object2IntOpenHashMap<Line> newCache = new Object2IntOpenHashMap<>(mapData.nodeBorderLines.size());
         int rgb = white ? 0xFFFFFF : DEFAULT_NODE_COLOR;
-        int color = withAlpha(rgb, alpha);
+        int color = withAlpha(rgb, FULL_ALPHA);
         for (AechronisMapData.NodeBorderLine l : mapData.nodeBorderLines) {
             newCache.put(new Line(l.x1, l.z1, l.x2, l.z2), color);
         }
@@ -197,16 +234,88 @@ public class AechronisRenderer extends Module {
         if (!cfg.showEverything) return result;
         if (dimension != ChunkUtils.getActualDimension()) return result;
 
-        int alpha = cfg.getOccupiedDiagonalAlpha();
         for (String tid : mapData.capturedTerritoryIds) {
             List<AechronisMapData.NodeBorderLine> segments = mapData.territoryDiagonals.get(tid);
             if (segments == null) continue;
             Integer color = mapData.territoryDiagonalColors.get(tid);
             if (color == null) continue;
-            int rgba = withAlpha(color, alpha);
+            int rgba = withAlpha(color, FULL_ALPHA);
             for (AechronisMapData.NodeBorderLine diag : segments) {
                 result.put(new Line(diag.x1, diag.z1, diag.x2, diag.z2), rgba);
             }
+        }
+        return result;
+    }
+
+    // ---- War chunks (solid color, purged after WAR_CHUNK_TIMEOUT_MS) ----
+    // Not cached — small, time-sensitive set; the timeout purge below has to run on
+    // every call anyway, so a cache would just add bookkeeping for no benefit.
+    //
+    // The purge runs BEFORE any of the cfg/dimension early-returns below, and must stay
+    // that way: this getter is still invoked on its registered interval by XaeroPlus's
+    // DrawFeatureFactory regardless of our own config toggles or which dimension the
+    // player is currently in (same as every other getter in this class) — it's the only
+    // place mapData.warChunks ever gets cleaned up. Purging after an early-return would
+    // mean a disabled "Show War Stripes" toggle, or standing in a different dimension,
+    // silently stops cleanup and lets the map grow one entry per capture, unbounded, for
+    // the rest of the client session.
+    private Long2LongOpenHashMap getWarChunks(ResourceKey<Level> dimension) {
+        long now = System.currentTimeMillis();
+        mapData.warChunks.entrySet().removeIf(e -> (now - e.getValue().captureTime) > WAR_CHUNK_TIMEOUT_MS);
+
+        Long2LongOpenHashMap result = new Long2LongOpenHashMap();
+        AechronisConfig cfg = AechronisConfig.get();
+        if (!cfg.showEverything) return result;
+        // Solid recolor is part of the same "war stripe" visual as the X-mark below —
+        // one toggle controls both, matching AechronisConfig's showWarStripes doc.
+        if (!cfg.showWarStripes) return result;
+        if (dimension != ChunkUtils.getActualDimension()) return result;
+
+        int alpha = cfg.getNationFillAlpha();
+        for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
+            result.put((long) e.getKey(), (long) withAlpha(e.getValue().color, alpha));
+        }
+        return result;
+    }
+
+    // ---- War stripes — X shape on the same set as getWarChunks() ----
+    private Object2IntMap<Line> getWarStripes(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
+        Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
+        AechronisConfig cfg = AechronisConfig.get();
+        if (!cfg.showEverything) return result;
+        if (!cfg.showWarStripes) return result;
+        if (dimension != ChunkUtils.getActualDimension()) return result;
+
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
+            if ((now - e.getValue().captureTime) > WAR_CHUNK_TIMEOUT_MS) continue;
+            int cx = ChunkPos.getX(e.getKey()) * 16;
+            int cz = ChunkPos.getZ(e.getKey()) * 16;
+            int color = withAlpha(e.getValue().color, FULL_ALPHA);
+            result.put(new Line(cx,      cz,      cx + 16, cz + 16), color);
+            result.put(new Line(cx + 16, cz,      cx,      cz + 16), color);
+        }
+        return result;
+    }
+
+    // ---- Under-attack stripes (single diagonal per chunk, attacker's nation color) ----
+    // Purge runs before the early-returns for the same reason as getWarChunks() above —
+    // this getter is the only cleanup path for mapData.underAttackChunks and keeps being
+    // called on its interval regardless of config toggles or current dimension.
+    private Object2IntMap<Line> getUnderAttackStripes(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
+        long now = System.currentTimeMillis();
+        mapData.underAttackChunks.entrySet().removeIf(e -> (now - e.getValue().startTime) > ATTACK_TIMEOUT_MS);
+
+        Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
+        AechronisConfig cfg = AechronisConfig.get();
+        if (!cfg.showEverything) return result;
+        if (!cfg.showUnderAttackStripes) return result;
+        if (dimension != ChunkUtils.getActualDimension()) return result;
+
+        for (Map.Entry<Long, AechronisMapData.UnderAttackChunk> e : mapData.underAttackChunks.entrySet()) {
+            int cx = ChunkPos.getX(e.getKey()) * 16;
+            int cz = ChunkPos.getZ(e.getKey()) * 16;
+            result.put(new Line(cx, cz, cx + 16, cz + 16), withAlpha(e.getValue().color, FULL_ALPHA));
         }
         return result;
     }
@@ -305,32 +414,9 @@ public class AechronisRenderer extends Module {
         for (AechronisMapData.PortInfo p : mapData.ports) {
             int textColor = (0xFF << 24) | (p.color & 0x00FFFFFF);
             long key = ChunkPos.asLong(p.x >> 4, p.z >> 4);
-            newCache.put(key, new Text(p.name, p.x, p.z, textColor, 0.6f));
+            newCache.put(key, new Text(p.name, p.x, p.z, textColor, 0.4f));
         }
         cachedPortTexts = newCache;
-    }
-
-    // ---- Port connection lines — between same-group ports, group color ----
-    private Object2IntMap<Line> getPortConnections(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Object2IntOpenHashMap<>();
-        if (!cfg.showPortConnections) return new Object2IntOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Object2IntOpenHashMap<>();
-
-        if (mapData.portConnections.size() != lastPortConnectionCount) {
-            rebuildPortConnectionsCache();
-            lastPortConnectionCount = mapData.portConnections.size();
-        }
-        return cachedPortConnections;
-    }
-
-    private void rebuildPortConnectionsCache() {
-        Object2IntOpenHashMap<Line> newCache = new Object2IntOpenHashMap<>(mapData.portConnections.size());
-        for (AechronisMapData.PortConnection c : mapData.portConnections) {
-            int color = (0xFF << 24) | (c.color & 0x00FFFFFF);
-            newCache.put(new Line(c.x1, c.z1, c.x2, c.z2), color);
-        }
-        cachedPortConnections = newCache;
     }
 
     // ---- Helpers ----
