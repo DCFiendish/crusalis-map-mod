@@ -26,11 +26,13 @@ public class AechronisMapData {
     // Distinct from the territory-level occupied/annexed tracking above: these
     // track individual CHUNKS during an active siege, driven entirely by chat
     // events (no towns.json equivalent — the JSON has no notion of "currently
-    // under attack" or "captured in the last 90s"). warChunks holds freshly
-    // chunk-captured chunks (solid recolor + X-stripe, until annexed away or the
-    // renderer's timeout purges the entry); underAttackChunks holds chunks with
-    // a flag currently planted (single diagonal in the attacker's nation color,
-    // cleared by a defeated/explosion message or the renderer's backstop timeout).
+    // under attack" or "recently captured"). warChunks holds chunk-captured chunks
+    // (solid recolor + X-stripe) until the same chunk is captured again, the whole
+    // node is captured via its home/core chunk, or the renderer's long backstop
+    // timeout purges the entry (see AechronisRenderer.WAR_CHUNK_TIMEOUT_MS);
+    // underAttackChunks holds chunks with a flag currently planted (single diagonal
+    // in the attacker's nation color), cleared by a defended/captured/explosion
+    // message or the renderer's backstop timeout.
     public final ConcurrentHashMap<Long, WarChunk> warChunks = new ConcurrentHashMap<>();
     public final ConcurrentHashMap<Long, UnderAttackChunk> underAttackChunks = new ConcurrentHashMap<>();
 

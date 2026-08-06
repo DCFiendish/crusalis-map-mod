@@ -24,15 +24,24 @@ public class AechronisRenderer extends Module {
     // opacity is only user-adjustable for the nation fill (see AechronisConfig).
     private static final int  FULL_ALPHA            = 255;
 
-    // Timeouts for per-chunk war visuals (Version B). War chunks (solid recolor + X
-    // stripe on a freshly-captured chunk) purge after 90s. Under-attack stripes are
-    // cleared by chat events (defeated/explosion) in the normal case; this timeout is
-    // only a backstop for a missed end-message. Checked against the real max attack
+    // Timeouts for per-chunk war visuals (Version B).
+    //
+    // War chunks (solid recolor + X stripe on a captured chunk) are a "recent activity"
+    // marker, not a live-attack-duration bound — they're meant to stay visible for the
+    // rest of a siege, not flash briefly. They're cleared by (in order of how they
+    // normally happen): the same chunk being captured again (AechronisMapData.
+    // captureChunk() overwrites the existing entry), the whole node being captured via
+    // its home/core chunk (AechronisMapData.clearChunkWarState(), fired from
+    // captureTerritory()/annexTerritory()), or — only as a backstop for a chunk that
+    // never sees either of those — this timeout.
+    //
+    // Under-attack stripes (flag currently planted) are cleared by chat events
+    // (defended/captured/exploded) in the normal case; this timeout is only a backstop
+    // for a missed end-message, generous enough to comfortably outlast any real attack
     // duration (FlagWar.kt: chunkAttackTime 200 ticks/10s base × up to 2x wasteland ×
-    // 2x home × per-territory attacker/defender multiplier) — both have comfortable
-    // margin over realistic durations.
-    private static final long WAR_CHUNK_TIMEOUT_MS = 90_000L;
-    private static final long ATTACK_TIMEOUT_MS    = 600_000L;
+    // 2x home × per-territory attacker/defender multiplier).
+    private static final long WAR_CHUNK_TIMEOUT_MS = 3 * 60 * 60 * 1000L; // 3 hours
+    private static final long ATTACK_TIMEOUT_MS    = 20 * 60 * 1000L;    // 20 minutes
 
     // Held directly by us, NOT registered with Globals.drawManager.registry() — that
     // registry is gated behind XaeroPlus's fairplay check (HudMod.INSTANCE.isFairPlay()).
