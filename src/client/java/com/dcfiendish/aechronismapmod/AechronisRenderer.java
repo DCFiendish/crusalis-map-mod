@@ -12,7 +12,6 @@ import xaeroplus.feature.render.DrawFeatureFactory;
 import xaeroplus.feature.render.line.Line;
 import xaeroplus.feature.render.text.Text;
 import xaeroplus.module.Module;
-import xaeroplus.util.ChunkUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -184,12 +183,20 @@ public class AechronisRenderer extends Module {
         ourFeatures.clear();
     }
 
+    // Crusalis nodes/towns/nations only exist in the Overworld. Compare the map being
+    // drawn against the Overworld, not the player's current dimension: otherwise standing
+    // in the Nether draws Overworld data onto the Nether map, and viewing the Overworld
+    // map from the Nether shows nothing.
+    private static boolean isCrusalisDimension(ResourceKey<Level> dimension) {
+        return dimension == Level.OVERWORLD;
+    }
+
     // ---- Nation chunks — cached, only rebuilt on data or config change ----
     private Long2LongOpenHashMap getNationChunks(ResourceKey<Level> dimension) {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Long2LongOpenHashMap();
         if (!cfg.showNationFills) return new Long2LongOpenHashMap();
-        if (dimension != ChunkUtils.getActualDimension()) return new Long2LongOpenHashMap();
+        if (!isCrusalisDimension(dimension)) return new Long2LongOpenHashMap();
 
         int alpha = cfg.getNationFillAlpha();
         if (mapData.dirty || alpha != lastNationAlpha) {
@@ -213,7 +220,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Object2IntOpenHashMap<>();
         if (!cfg.showNodeBorders) return new Object2IntOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Object2IntOpenHashMap<>();
+        if (!isCrusalisDimension(dimension)) return new Object2IntOpenHashMap<>();
 
         boolean white = cfg.whiteBorders;
         if (mapData.dirty || white != lastWhiteBorders || mapData.nodeBorderLines.size() != lastNodeBorderCount) {
@@ -241,7 +248,7 @@ public class AechronisRenderer extends Module {
         Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return result;
-        if (dimension != ChunkUtils.getActualDimension()) return result;
+        if (!isCrusalisDimension(dimension)) return result;
 
         for (String tid : mapData.capturedTerritoryIds) {
             List<AechronisMapData.NodeBorderLine> segments = mapData.territoryDiagonals.get(tid);
@@ -278,7 +285,7 @@ public class AechronisRenderer extends Module {
         // Solid recolor is part of the same "war stripe" visual as the X-mark below —
         // one toggle controls both, matching AechronisConfig's showWarStripes doc.
         if (!cfg.showWarStripes) return result;
-        if (dimension != ChunkUtils.getActualDimension()) return result;
+        if (!isCrusalisDimension(dimension)) return result;
 
         int alpha = cfg.getNationFillAlpha();
         for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
@@ -293,7 +300,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return result;
         if (!cfg.showWarStripes) return result;
-        if (dimension != ChunkUtils.getActualDimension()) return result;
+        if (!isCrusalisDimension(dimension)) return result;
 
         long now = System.currentTimeMillis();
         for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
@@ -319,7 +326,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return result;
         if (!cfg.showUnderAttackStripes) return result;
-        if (dimension != ChunkUtils.getActualDimension()) return result;
+        if (!isCrusalisDimension(dimension)) return result;
 
         for (Map.Entry<Long, AechronisMapData.UnderAttackChunk> e : mapData.underAttackChunks.entrySet()) {
             int cx = ChunkPos.getX(e.getKey()) * 16;
@@ -334,7 +341,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
         if (!cfg.showNodeLabels) return new Long2ObjectOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Long2ObjectOpenHashMap<>();
+        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
 
         if (mapData.dirty || mapData.nodeLabelInfos.size() != lastLabelCount) {
             rebuildNodeTextsCache();
@@ -360,7 +367,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
         if (!cfg.showTownLabels) return new Long2ObjectOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Long2ObjectOpenHashMap<>();
+        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
 
         if (mapData.dirty || mapData.townLabelInfos.size() != lastTownLabelCount) {
             rebuildTownTextsCache();
@@ -385,7 +392,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
         if (!cfg.showNationLabels) return new Long2ObjectOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Long2ObjectOpenHashMap<>();
+        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
 
         if (mapData.dirty || mapData.nationLabelInfos.size() != lastNationLabelCount) {
             rebuildNationTextsCache();
@@ -409,7 +416,7 @@ public class AechronisRenderer extends Module {
         AechronisConfig cfg = AechronisConfig.get();
         if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
         if (!cfg.showPorts) return new Long2ObjectOpenHashMap<>();
-        if (dimension != ChunkUtils.getActualDimension()) return new Long2ObjectOpenHashMap<>();
+        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
 
         if (mapData.ports.size() != lastPortCount) {
             rebuildPortTextsCache();
