@@ -1,17 +1,17 @@
 package com.dcfiendish.aechronismapmod.client.mixin;
 
 import com.dcfiendish.aechronismapmod.AechronisRenderer;
-import com.mojang.blaze3d.vertex.PoseStack;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import xaero.common.HudMod;
-import xaero.lib.client.graphics.XaeroBufferProvider;
-import xaeroplus.feature.render.DrawContext;
 import xaeroplus.feature.render.DrawFeature;
+import xaeroplus.feature.render.DrawFeatureRegistry;
 import xaeroplus.feature.render.DrawManager;
+
+import java.util.function.Consumer;
 
 /**
  * Renders Aechronis's own draw features (nation fills, borders, labels) directly,
@@ -20,8 +20,12 @@ import xaeroplus.feature.render.DrawManager;
  * methods drawMinimapFeatures / drawWorldMapFeatures).
  *
  * SCOPE OF THE FAIRPLAY WORKAROUND IN THIS FILE:
- *   1. HEAD inject: renders OUR overlay (AechronisRenderer.ourFeatures) unconditionally
- *      (a no-op when the list is empty — see gating note below).
+ *   1. @WrapOperation on the registry.forEach(...) call inside drawMinimapFeatures /
+ *      drawWorldMapFeatures: renders OUR overlay (AechronisRenderer.ourFeatures) with
+ *      the exact DrawContext and translated PoseStack XaeroPlus just built for its own
+ *      features, then lets XaeroPlus's registry render as normal (a no-op for us when
+ *      the list is empty — see gating note below). This only runs once the method is
+ *      past its fairplay early-return, which the redirect in (2) handles on Crusalis.
  *   2. @Redirect on isFairPlay() within drawMinimapFeatures / drawWorldMapFeatures:
  *      forces the check to return false so XaeroPlus's OWN draw features registered
  *      via Globals.drawManager.registry() (the user drawing tool, view-distance
@@ -55,52 +59,35 @@ import xaeroplus.feature.render.DrawManager;
  * confirm XaeroPlus's own draw features stay fairplay-gated there). If either check
  * fails, revert this file immediately.
  *
- * VERSION COMPATIBILITY: every injector below is `require = 0` (soft-fail) rather
- * than the mixins.json default of 1 (hard-fail). This mixin targets DrawManager's
- * internal method names/signatures and a specific isFairPlay() call site — none of
- * that is part of XaeroPlus's stable public addon API (unlike AechronisRenderer's
- * xaeroplus.feature.render.* usage, which is), so a future/older XaeroPlus release
- * could change it without warning. With require=0, a mismatch just fails this one
- * mixin quietly (Mixin logs a WARN) and the overlay/fairplay-bypass silently no-ops
- * instead of crashing the client outright — degrading gracefully across whatever
- * XaeroPlus version the user actually has installed, rather than an all-or-nothing
- * dependency pin.
+ * VERSION COMPATIBILITY: XaeroPlus changed drawMinimapFeatures' parameters (2.34.1
+ * added a zoom arg) and DrawContext's fields (2.34.1 added the view matrix and camera
+ * position) during the 1.21.11 line. This mixin deliberately depends on neither: it
+ * never names the target methods' parameters or builds its own DrawContext, it only
+ * hooks two call sites that are identical in every 1.21.11 release from 2.29.2
+ * through 2.36.x — the HudMod.isFairPlay() check and DrawFeatureRegistry.forEach(
+ * Consumer) — and hands our features the Consumer XaeroPlus already built.
+ *
+ * Every injector is still `require = 0` (soft-fail) rather than the mixins.json
+ * default of 1: these are DrawManager internals, not XaeroPlus's stable addon API, so
+ * a future release could change them. A mismatch then fails this one mixin quietly
+ * (Mixin logs a WARN) and the overlay/fairplay-bypass no-ops instead of crashing.
  */
 @Mixin(DrawManager.class)
 public class AechronisDrawManagerMixin {
 
-    @Inject(method = "drawMinimapFeatures", at = @At("HEAD"), require = 0)
-    private void aechronis$alwaysDrawMinimap(int chunkX, int chunkZ, int tileX, int tileZ,
-                                             int insideX, int insideZ,
-                                             PoseStack matrixStack, XaeroBufferProvider renderTypeBuffers,
-                                             CallbackInfo ci) {
-        if (AechronisRenderer.ourFeatures.isEmpty()) return;
-        DrawContext ctx = new DrawContext(matrixStack, renderTypeBuffers, 1.0, false);
-        matrixStack.pushPose();
-        matrixStack.translate(
-                (float) (-(chunkX * 64) - tileX * 16 - insideX),
-                (float) (-(chunkZ * 64) - tileZ * 16 - insideZ),
-                0.0F
-        );
+    @WrapOperation(
+            method = {"drawMinimapFeatures", "drawWorldMapFeatures"},
+            at = @At(value = "INVOKE", target = "Lxaeroplus/feature/render/DrawFeatureRegistry;forEach(Ljava/util/function/Consumer;)V"),
+            require = 0
+    )
+    private void aechronis$drawOurFeatures(DrawFeatureRegistry registry, Consumer<DrawFeature> renderFeature,
+                                           Operation<Void> original) {
+        // renderFeature is XaeroPlus's own `feature -> feature.render(ctx)`, so ours draw
+        // beneath XaeroPlus's features with the same context and transforms they get.
         for (DrawFeature feature : AechronisRenderer.ourFeatures) {
-            feature.render(ctx);
+            renderFeature.accept(feature);
         }
-        matrixStack.popPose();
-    }
-
-    @Inject(method = "drawWorldMapFeatures", at = @At("HEAD"), require = 0)
-    private void aechronis$alwaysDrawWorldMap(int flooredCameraX, int flooredCameraZ,
-                                              PoseStack matrixStack, double fboScale,
-                                              XaeroBufferProvider renderTypeBuffers,
-                                              CallbackInfo ci) {
-        if (AechronisRenderer.ourFeatures.isEmpty()) return;
-        DrawContext ctx = new DrawContext(matrixStack, renderTypeBuffers, fboScale, true);
-        matrixStack.pushPose();
-        matrixStack.translate((float) (-flooredCameraX), (float) (-flooredCameraZ), 1.0F);
-        for (DrawFeature feature : AechronisRenderer.ourFeatures) {
-            feature.render(ctx);
-        }
-        matrixStack.popPose();
+        original.call(registry, renderFeature);
     }
 
     /**

@@ -145,28 +145,28 @@ public class AechronisRenderer extends Module {
                 )
         );
         ourFeatures.add(
-                DrawFeatureFactory.text(
+                XaeroPlusCompat.asyncText(
                         "AechronisNodeLabels",
                         this::getNodeTexts,
                         2000
                 )
         );
         ourFeatures.add(
-                DrawFeatureFactory.text(
+                XaeroPlusCompat.asyncText(
                         "AechronisTownLabels",
                         this::getTownTexts,
                         2000
                 )
         );
         ourFeatures.add(
-                DrawFeatureFactory.text(
+                XaeroPlusCompat.asyncText(
                         "AechronisNationLabels",
                         this::getNationTexts,
                         2000
                 )
         );
         ourFeatures.add(
-                DrawFeatureFactory.text(
+                XaeroPlusCompat.asyncText(
                         "AechronisPortLabels",
                         this::getPortTexts,
                         2000

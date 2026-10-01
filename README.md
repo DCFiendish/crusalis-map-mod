@@ -29,9 +29,14 @@ live war visuals during a siege.
 ## Requirements
 
 - Fabric Loader, Fabric API
-- [XaeroPlus](https://modrinth.com/mod/xaeroplus) 2.30.10+fabric-1.21.11
-- [Xaero's Minimap](https://modrinth.com/mod/xaeros-minimap) 25.3.10
-- [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map) 1.40.11
+- Minecraft 1.21.11
+- [XaeroPlus](https://modrinth.com/mod/xaeroplus) 2.29.2 or newer (any 1.21.11 release,
+  2.29.2 through 2.36.4 checked)
+- [Xaero's Minimap](https://modrinth.com/mod/xaeros-minimap) and
+  [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map): whichever versions
+  your XaeroPlus release asks for. Each XaeroPlus release pins its own World Map
+  version, so across the 1.21.11 line that is Minimap 25.3.1 to 26.5.0 and World Map
+  1.40.1 to 1.46.0.
 - Cloth Config, Mod Menu
 
 ## Building
