@@ -3,14 +3,13 @@ package com.dcfiendish.aechronismapmod;
 import me.shedaniel.autoconfig.AutoConfig;
 import me.shedaniel.autoconfig.serializer.GsonConfigSerializer;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 
 public class AechronisMapMod implements ClientModInitializer {
 
 	public static AechronisMapData mapData;
 	private static AechronisDataFetcher fetcher;
-	private static AechronisRenderer renderer;
-	private static boolean rendererRegistered = false;
 
 	@Override
 	public void onInitializeClient() {
@@ -23,70 +22,41 @@ public class AechronisMapMod implements ClientModInitializer {
 		mapData = new AechronisMapData();
 		fetcher = new AechronisDataFetcher();
 		fetcher.mapData = mapData;
+		AechronisRenderer.init(mapData);
 
 		// Register chat listener
 		new AechronisChatListener(mapData).register();
 
-		// Re-run on EVERY join, including proxy transfers (e.g. lobby -> main server),
-		// since XaeroPlus may treat a backend transfer as a new map-world and drop
-		// previously-registered draw features. We re-enable (not just enable-once)
-		// so the draw features get freshly re-registered every time.
-		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+		// Purges and cache rebuilds run here, independent of toggles, dimension or open screens.
+		ClientTickEvents.END_CLIENT_TICK.register(client -> AechronisRenderer.tick());
 
+		// Re-run on EVERY join, including proxy transfers (e.g. lobby -> main server).
+		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			// Only activate on the actual Crusalis server — skip singleplayer and any other server entirely.
-			// IMPORTANT: every early-return path below must explicitly disable an already-enabled
-			// renderer, not just skip re-enabling it. Otherwise leaving Crusalis (e.g. quitting to
-			// singleplayer, or to any other server) leaves the PREVIOUS session's renderer running —
-			// its draw features stay registered in AechronisRenderer.ourFeatures and the mixin keeps
-			// rendering them unconditionally every frame regardless of what world you're actually in.
-			// (This was the actual cause of the nation overlay showing up in singleplayer.)
+			// Every early-return path must deactivate the overlay, or leaving Crusalis (e.g. quitting to
+			// singleplayer, or to any other server) keeps drawing the previous session's data.
 			var serverData = client.getCurrentServer();
 			String serverAddress = serverData != null ? serverData.ip : null;
-			if (serverAddress == null || !serverAddress.toLowerCase().contains("crusalis.net")) {
+			boolean onCrusalis = serverAddress != null && serverAddress.toLowerCase().contains("crusalis.net");
+			// Dev/testing only: draw live Crusalis data in any world (e.g. the dev client's singleplayer).
+			if (!onCrusalis && Boolean.getBoolean("crusalis.devForceActive")) onCrusalis = true;
+			if (!onCrusalis) {
 				System.out.println("[Crusalis] Not connected to Crusalis (address=" + serverAddress + "), mod inactive.");
-				if (rendererRegistered) {
-					renderer.disable();
-					System.out.println("[Crusalis] Renderer disabled (left Crusalis).");
-				}
+				AechronisRenderer.setActive(false);
 				fetcher.onLeaveCrusalis();
 				return;
 			}
 
-			if (!rendererRegistered) {
-				// First time ever this session: create and add the module once.
-				renderer = new AechronisRenderer(mapData);
-				xaeroplus.module.ModuleManager.addModule(renderer);
-				renderer.enable();
-				rendererRegistered = true;
-				System.out.println("[Crusalis] Renderer created and enabled.");
-			} else {
-				// Subsequent joins (proxy transfers etc.) — force a fresh re-registration
-				// of draw features by disabling then re-enabling the same module instance.
-				renderer.disable();
-				renderer.enable();
-				System.out.println("[Crusalis] Renderer re-enabled (fresh registration).");
-			}
+			AechronisRenderer.setActive(true);
+			System.out.println("[Crusalis] Overlay enabled.");
 			fetcher.onJoinCrusalis();
 		});
 
-		// Disconnecting (quit to title, kicked, connection lost) does NOT fire another
-		// JOIN event. We deliberately do NOT call renderer.disable() here, even though
-		// that means AechronisRenderer.ourFeatures (and therefore the Crusalis-only
-		// fairplay bypass in AechronisDrawManagerMixin) can stay "live" for a few extra
-		// frames until the next JOIN corrects it — this used to call renderer.disable()
-		// immediately on disconnect, but that closes each DrawFeature (releasing
-		// XaeroPlus's own GL-backed resources) at a moment that isn't guaranteed to be
-		// safe relative to the old world/GL context's own teardown, which produced a
-		// reproducible native crash (Windows exit 0xC0000409 / STATUS_STACK_BUFFER_OVERRUN,
-		// no Java exception) specifically when disconnecting from Crusalis. The JOIN
-		// handler's existing "not connected to Crusalis" branch already calls
-		// renderer.disable() safely — by that point a full new connection has been
-		// established, well past the old GL context's teardown window. A brief stale
-		// overlay/bypass is a far smaller cost than a client crash.
-		//
-		// Safe to call here regardless: onLeaveCrusalis() is pure Java scheduler state
-		// (cancels a ScheduledFuture), no GL/native interaction at all.
+		// Disconnecting (quit to title, kicked, connection lost) does not fire another JOIN.
+		// The overlay holds no GPU resources of its own any more (Xaero's buffers carry the
+		// vertices), so it can be switched off right away.
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+			AechronisRenderer.setActive(false);
 			fetcher.onLeaveCrusalis();
 		});
 

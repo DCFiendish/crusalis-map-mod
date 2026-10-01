@@ -1,27 +1,47 @@
 package com.dcfiendish.aechronismapmod;
 
-import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.objects.Object2IntMap;
-import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import it.unimi.dsi.fastutil.longs.Long2LongMap;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
-import xaeroplus.feature.render.DrawFeature;
-import xaeroplus.feature.render.DrawFeatureFactory;
-import xaeroplus.feature.render.line.Line;
-import xaeroplus.feature.render.text.Text;
-import xaeroplus.module.Module;
+import org.joml.Matrix4f;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class AechronisRenderer extends Module {
-    private static final int  DEFAULT_NODE_COLOR    = 0x000000;
+/**
+ * Draws the Crusalis overlay straight into Xaero's World Map and Minimap — no XaeroPlus.
+ *
+ * Geometry (fills and lines) goes into Xaero's own map framebuffers through
+ * AechronisWorldMapMixin / AechronisMinimapMixin, so it zooms, rotates and gets clipped
+ * exactly like the map tiles. Labels are drawn later, after the map is composited
+ * (AechronisWorldMapMixin / AechronisMinimapLabelMixin), so they stay upright and crisp on a
+ * rotating minimap. Hook details: docs/xaero-hooks.md.
+ *
+ * Everything drawn is built on the client tick (tick()) into immutable lists that the render
+ * thread only reads; static layers rebuild only when map data or config change.
+ */
+public final class AechronisRenderer {
+    private static final int DEFAULT_NODE_COLOR = 0x000000;
     // Every overlay element except the nation fill renders fully opaque, always —
     // opacity is only user-adjustable for the nation fill (see AechronisConfig).
-    private static final int  FULL_ALPHA            = 255;
+    private static final int FULL_ALPHA = 255;
+
+    // Line width in config units, as in the XaeroPlus days: 16 * width blocks wide, but never
+    // thinner than 1.6 framebuffer pixels.
+    private static final float NODE_BORDER_WIDTH = 0.1f;
+
+    private static final float NODE_LABEL_SCALE = 0.5f;
+    private static final float NATION_LABEL_SCALE = 0.9f;
+    private static final float PORT_LABEL_SCALE = 0.4f;
 
     // Timeouts for per-chunk war visuals (Version B).
     //
@@ -42,403 +62,359 @@ public class AechronisRenderer extends Module {
     private static final long WAR_CHUNK_TIMEOUT_MS = 3 * 60 * 60 * 1000L; // 3 hours
     private static final long ATTACK_TIMEOUT_MS    = 20 * 60 * 1000L;    // 20 minutes
 
-    // Held directly by us, NOT registered with Globals.drawManager.registry() — that
-    // registry is gated behind XaeroPlus's fairplay check (HudMod.INSTANCE.isFairPlay()).
-    // Our own AechronisDrawManagerMixin renders this list unconditionally, every frame,
-    // independent of the fairplay flag. Approved explicitly by server admin for this
-    // overlay specifically — entity radar / cave mode fairplay checks are untouched.
-    public static final List<DrawFeature> ourFeatures = new ArrayList<>();
+    record Rect(int x1, int z1, int x2, int z2, int argb) {}
+    record Seg(int x1, int z1, int x2, int z2, int argb, float width) {}
+    record Label(String text, int x, int z, int argb, float scale) {}
 
-    private final AechronisMapData mapData;
-
-    // Cached maps — only rebuilt when data or config changes
-    private Long2LongOpenHashMap cachedNationChunks = new Long2LongOpenHashMap();
-    private Object2IntOpenHashMap<Line> cachedNodeBorders = new Object2IntOpenHashMap<>();
-    private Long2ObjectOpenHashMap<Text> cachedNodeTexts = new Long2ObjectOpenHashMap<>();
-    private int lastLabelCount = -1;
-    private Long2ObjectOpenHashMap<Text> cachedTownTexts = new Long2ObjectOpenHashMap<>();
-    private int lastTownLabelCount = -1;
-    // Nation labels and ports are static-ish (ports never change; nation labels rebuild
-    // only when the nation list size changes). Cached the same way.
-    private Long2ObjectOpenHashMap<Text> cachedNationTexts = new Long2ObjectOpenHashMap<>();
-    private int lastNationLabelCount = -1;
-    private Long2ObjectOpenHashMap<Text> cachedPortTexts = new Long2ObjectOpenHashMap<>();
-    private int lastPortCount = -1;
-
-    // Track last config state to detect changes
-    private int lastNationAlpha      = -1;
-    private boolean lastWhiteBorders = false;
-    // -1 sentinel guarantees the node-border cache actually builds on the very first
-    // call, regardless of mapData.dirty/whiteBorders state — without it, if dirty is
-    // still false and whiteBorders is still its false default on first render (the
-    // common case), neither condition would ever fire and cachedNodeBorders would stay
-    // permanently empty. Real sizes are always >= 0, so -1 can never coincidentally match.
-    private int lastNodeBorderCount  = -1;
-
-    public AechronisRenderer(AechronisMapData mapData) {
-        this.mapData = mapData;
+    /** Everything one frame draws, in draw order. Swapped atomically, never mutated. */
+    private record Scene(List<Rect> nationFills, List<Seg> nodeBorders, List<Seg> occupiedDiagonals,
+                         List<Rect> warFills, List<Seg> warStripes, List<Label> labels) {
+        static final Scene EMPTY = new Scene(List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
-    @Override
-    protected void onEnable() {
-        ourFeatures.clear();
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorChunkHighlights(
-                        "AechronisNations",
-                        this::getNationChunks,
-                        this::getChunkColor,
-                        2000
-                )
-        );
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorLines(
-                        "AechronisNodeBorders",
-                        this::getNodeBorders,
-                        (line, value) -> value,
-                        () -> 0.1f,
-                        2000
-                )
-        );
-        // Two-phase capture/annex model: a single diagonal per captured (occupied-not-
-        // annexed) node, drawn in the occupier's color. The node's base fill still shows
-        // the losing nation's color underneath — the diagonal is the marker that a
-        // takeover is in-progress but not yet finalized. Removed on annex.
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorLines(
-                        "AechronisOccupiedDiagonals",
-                        this::getOccupiedDiagonals,
-                        (line, value) -> value,
-                        () -> AechronisConfig.get().occupiedDiagonalWidth,
-                        1000
-                )
-        );
-        // Per-chunk war visuals (Version B) — distinct from the territory-level occupied
-        // diagonal above. WarChunks/WarStripes mark chunks captured within the last 90s
-        // (solid recolor + X); UnderAttackStripes marks chunks with a flag currently
-        // planted (single diagonal in the attacker's nation color). Driven by
-        // AechronisMapData.warChunks/underAttackChunks, populated by AechronisChatListener.
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorChunkHighlights(
-                        "AechronisWarChunks",
-                        this::getWarChunks,
-                        this::getChunkColor,
-                        500
-                )
-        );
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorLines(
-                        "AechronisWarStripes",
-                        this::getWarStripes,
-                        (line, value) -> value,
-                        () -> AechronisConfig.get().warStripeWidth,
-                        500
-                )
-        );
-        ourFeatures.add(
-                DrawFeatureFactory.multiColorLines(
-                        "AechronisUnderAttackStripes",
-                        this::getUnderAttackStripes,
-                        (line, value) -> value,
-                        () -> AechronisConfig.get().underAttackStripeWidth,
-                        500
-                )
-        );
-        ourFeatures.add(
-                XaeroPlusCompat.asyncText(
-                        "AechronisNodeLabels",
-                        this::getNodeTexts,
-                        2000
-                )
-        );
-        ourFeatures.add(
-                XaeroPlusCompat.asyncText(
-                        "AechronisTownLabels",
-                        this::getTownTexts,
-                        2000
-                )
-        );
-        ourFeatures.add(
-                XaeroPlusCompat.asyncText(
-                        "AechronisNationLabels",
-                        this::getNationTexts,
-                        2000
-                )
-        );
-        ourFeatures.add(
-                XaeroPlusCompat.asyncText(
-                        "AechronisPortLabels",
-                        this::getPortTexts,
-                        2000
-                )
-        );
-    }
-
-    @Override
-    protected void onDisable() {
-        for (DrawFeature f : ourFeatures) {
-            try {
-                f.close();
-            } catch (Exception ignored) {}
+    /** The config values the static layers depend on; a change triggers a rebuild. */
+    private record StaticConfig(boolean everything, boolean fills, int fillAlpha, boolean borders, boolean white,
+                                boolean nodeLabels, boolean townLabels, boolean nationLabels, boolean ports) {
+        static StaticConfig of(AechronisConfig c) {
+            return new StaticConfig(c.showEverything, c.showNationFills, c.getNationFillAlpha(), c.showNodeBorders,
+                    c.whiteBorders, c.showNodeLabels, c.showTownLabels, c.showNationLabels, c.showPorts);
         }
-        ourFeatures.clear();
+    }
+
+    private static AechronisMapData mapData;
+    private static volatile boolean active;
+    private static volatile Scene scene = Scene.EMPTY;
+
+    // Static layers, rebuilt only on data/config change.
+    private static StaticConfig lastConfig;
+    private static int lastBorderCount = -1, lastNodeLabelCount = -1, lastTownLabelCount = -1,
+            lastNationLabelCount = -1, lastPortCount = -1;
+    private static List<Rect> nationFills = List.of();
+    private static List<Seg> nodeBorders = List.of();
+    private static List<Label> labels = List.of();
+
+    private AechronisRenderer() {}
+
+    public static void init(AechronisMapData data) {
+        mapData = data;
+    }
+
+    public static boolean isActive() {
+        return active;
+    }
+
+    public static void setActive(boolean on) {
+        active = on;
+        if (!on) scene = Scene.EMPTY;
     }
 
     // Crusalis nodes/towns/nations only exist in the Overworld. Compare the map being
     // drawn against the Overworld, not the player's current dimension: otherwise standing
     // in the Nether draws Overworld data onto the Nether map, and viewing the Overworld
     // map from the Nether shows nothing.
-    private static boolean isCrusalisDimension(ResourceKey<Level> dimension) {
+    public static boolean isCrusalisDimension(ResourceKey<Level> dimension) {
         return dimension == Level.OVERWORLD;
     }
 
-    // ---- Nation chunks — cached, only rebuilt on data or config change ----
-    private Long2LongOpenHashMap getNationChunks(ResourceKey<Level> dimension) {
+    private static Scene sceneFor(ResourceKey<Level> mapDimension) {
+        return active && isCrusalisDimension(mapDimension) ? scene : Scene.EMPTY;
+    }
+
+    // ---- Client tick: purge + cache rebuilds ----
+
+    /**
+     * Runs every client tick, whatever the toggles, dimension or open screen: this is the
+     * only place warChunks/underAttackChunks get purged, so cleanup can't stall behind a
+     * disabled layer the way it could while it lived inside XaeroPlus draw-feature getters.
+     */
+    public static void tick() {
+        if (mapData == null) return;
+        long now = System.currentTimeMillis();
+        mapData.warChunks.entrySet().removeIf(e -> now - e.getValue().captureTime > WAR_CHUNK_TIMEOUT_MS);
+        mapData.underAttackChunks.entrySet().removeIf(e -> now - e.getValue().startTime > ATTACK_TIMEOUT_MS);
+        if (!active) return;
+
         AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Long2LongOpenHashMap();
-        if (!cfg.showNationFills) return new Long2LongOpenHashMap();
-        if (!isCrusalisDimension(dimension)) return new Long2LongOpenHashMap();
+        rebuildStaticIfNeeded(cfg);
+        scene = buildScene(cfg);
+    }
 
-        int alpha = cfg.getNationFillAlpha();
-        if (mapData.dirty || alpha != lastNationAlpha) {
-            rebuildNationChunksCache(alpha);
-            lastNationAlpha = alpha;
-            mapData.dirty = false;
+    private static void rebuildStaticIfNeeded(AechronisConfig cfg) {
+        StaticConfig sc = StaticConfig.of(cfg);
+        boolean dirty = mapData.dirty;
+        if (!dirty && sc.equals(lastConfig)
+                && mapData.nodeBorderLines.size() == lastBorderCount
+                && mapData.nodeLabelInfos.size() == lastNodeLabelCount
+                && mapData.townLabelInfos.size() == lastTownLabelCount
+                && mapData.nationLabelInfos.size() == lastNationLabelCount
+                && mapData.ports.size() == lastPortCount) {
+            return;
         }
-        return cachedNationChunks;
-    }
+        // Clear before reading so a concurrent update during the rebuild flags it again.
+        mapData.dirty = false;
+        lastConfig = sc;
+        lastBorderCount = mapData.nodeBorderLines.size();
+        lastNodeLabelCount = mapData.nodeLabelInfos.size();
+        lastTownLabelCount = mapData.townLabelInfos.size();
+        lastNationLabelCount = mapData.nationLabelInfos.size();
+        lastPortCount = mapData.ports.size();
 
-    private void rebuildNationChunksCache(int alpha) {
-        cachedNationChunks = mapData.buildAlphaCache(alpha);
-    }
+        nationFills = sc.everything && sc.fills ? mergeChunks(mapData.buildAlphaCache(sc.fillAlpha)) : List.of();
 
-    private int getChunkColor(long chunkPos, long value) {
-        return (int) value;
-    }
-
-    // ---- Node borders — uniform color (default or white), cached on data/config change ----
-    private Object2IntMap<Line> getNodeBorders(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Object2IntOpenHashMap<>();
-        if (!cfg.showNodeBorders) return new Object2IntOpenHashMap<>();
-        if (!isCrusalisDimension(dimension)) return new Object2IntOpenHashMap<>();
-
-        boolean white = cfg.whiteBorders;
-        if (mapData.dirty || white != lastWhiteBorders || mapData.nodeBorderLines.size() != lastNodeBorderCount) {
-            rebuildNodeBordersCache(white);
-            lastWhiteBorders = white;
-            lastNodeBorderCount = mapData.nodeBorderLines.size();
-        }
-        return cachedNodeBorders;
-    }
-
-    private void rebuildNodeBordersCache(boolean white) {
-        Object2IntOpenHashMap<Line> newCache = new Object2IntOpenHashMap<>(mapData.nodeBorderLines.size());
-        int rgb = white ? 0xFFFFFF : DEFAULT_NODE_COLOR;
-        int color = withAlpha(rgb, FULL_ALPHA);
-        for (AechronisMapData.NodeBorderLine l : mapData.nodeBorderLines) {
-            newCache.put(new Line(l.x1, l.z1, l.x2, l.z2), color);
-        }
-        cachedNodeBorders = newCache;
-    }
-
-    // ---- Occupied (captured-not-annexed) territory diagonals ----
-    // Not cached — the captured set is small (typically a handful of territories
-    // during war), and its contents can shift from chat events between polls.
-    private Object2IntMap<Line> getOccupiedDiagonals(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return result;
-        if (!isCrusalisDimension(dimension)) return result;
-
-        for (String tid : mapData.capturedTerritoryIds) {
-            List<AechronisMapData.NodeBorderLine> segments = mapData.territoryDiagonals.get(tid);
-            if (segments == null) continue;
-            Integer color = mapData.territoryDiagonalColors.get(tid);
-            if (color == null) continue;
-            int rgba = withAlpha(color, FULL_ALPHA);
-            for (AechronisMapData.NodeBorderLine diag : segments) {
-                result.put(new Line(diag.x1, diag.z1, diag.x2, diag.z2), rgba);
+        List<Seg> borders = new ArrayList<>();
+        if (sc.everything && sc.borders) {
+            int color = withAlpha(sc.white ? 0xFFFFFF : DEFAULT_NODE_COLOR, FULL_ALPHA);
+            for (AechronisMapData.NodeBorderLine l : mapData.nodeBorderLines) {
+                borders.add(new Seg(l.x1, l.z1, l.x2, l.z2, color, NODE_BORDER_WIDTH));
             }
         }
-        return result;
-    }
+        nodeBorders = List.copyOf(borders);
 
-    // ---- War chunks (solid color, purged after WAR_CHUNK_TIMEOUT_MS) ----
-    // Not cached — small, time-sensitive set; the timeout purge below has to run on
-    // every call anyway, so a cache would just add bookkeeping for no benefit.
-    //
-    // The purge runs BEFORE any of the cfg/dimension early-returns below, and must stay
-    // that way: this getter is still invoked on its registered interval by XaeroPlus's
-    // DrawFeatureFactory regardless of our own config toggles or which dimension the
-    // player is currently in (same as every other getter in this class) — it's the only
-    // place mapData.warChunks ever gets cleaned up. Purging after an early-return would
-    // mean a disabled "Show War Stripes" toggle, or standing in a different dimension,
-    // silently stops cleanup and lets the map grow one entry per capture, unbounded, for
-    // the rest of the client session.
-    private Long2LongOpenHashMap getWarChunks(ResourceKey<Level> dimension) {
-        long now = System.currentTimeMillis();
-        mapData.warChunks.entrySet().removeIf(e -> (now - e.getValue().captureTime) > WAR_CHUNK_TIMEOUT_MS);
-
-        Long2LongOpenHashMap result = new Long2LongOpenHashMap();
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return result;
-        // Solid recolor is part of the same "war stripe" visual as the X-mark below —
-        // one toggle controls both, matching AechronisConfig's showWarStripes doc.
-        if (!cfg.showWarStripes) return result;
-        if (!isCrusalisDimension(dimension)) return result;
-
-        int alpha = cfg.getNationFillAlpha();
-        for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
-            result.put((long) e.getKey(), (long) withAlpha(e.getValue().color, alpha));
+        List<Label> out = new ArrayList<>();
+        if (sc.everything) {
+            if (sc.nodeLabels) {
+                // Per-resource color (diamonds/gold/iron get their own; others white),
+                // carried on the label itself. Full alpha so text stays legible.
+                for (AechronisMapData.NodeLabelInfo i : mapData.nodeLabelInfos.values()) {
+                    out.add(new Label(i.label, i.x, i.z, withAlpha(i.color, FULL_ALPHA), NODE_LABEL_SCALE));
+                }
+            }
+            if (sc.townLabels) {
+                for (AechronisMapData.NodeLabelInfo i : mapData.townLabelInfos.values()) {
+                    out.add(new Label(i.label, i.x, i.z, withAlpha(0xFFFFFF, FULL_ALPHA), NODE_LABEL_SCALE));
+                }
+            }
+            if (sc.nationLabels) {
+                LongOpenHashSet seen = new LongOpenHashSet(); // one label per chunk, as before
+                for (AechronisMapData.NationLabelInfo i : mapData.nationLabelInfos) {
+                    if (seen.add(ChunkPos.asLong(i.x >> 4, i.z >> 4))) {
+                        out.add(new Label(i.label, i.x, i.z, withAlpha(i.color, FULL_ALPHA), NATION_LABEL_SCALE));
+                    }
+                }
+            }
+            if (sc.ports) {
+                LongOpenHashSet seen = new LongOpenHashSet();
+                for (AechronisMapData.PortInfo p : mapData.ports) {
+                    if (seen.add(ChunkPos.asLong(p.x >> 4, p.z >> 4))) {
+                        out.add(new Label(p.name, p.x, p.z, withAlpha(p.color, FULL_ALPHA), PORT_LABEL_SCALE));
+                    }
+                }
+            }
         }
-        return result;
+        labels = List.copyOf(out);
     }
 
-    // ---- War stripes — X shape on the same set as getWarChunks() ----
-    private Object2IntMap<Line> getWarStripes(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return result;
-        if (!cfg.showWarStripes) return result;
-        if (!isCrusalisDimension(dimension)) return result;
+    /** The war/occupation layers: small and chat-driven, so simply rebuilt every tick. */
+    private static Scene buildScene(AechronisConfig cfg) {
+        if (!cfg.showEverything) return Scene.EMPTY;
 
-        long now = System.currentTimeMillis();
-        for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
-            if ((now - e.getValue().captureTime) > WAR_CHUNK_TIMEOUT_MS) continue;
-            int cx = ChunkPos.getX(e.getKey()) * 16;
-            int cz = ChunkPos.getZ(e.getKey()) * 16;
-            int color = withAlpha(e.getValue().color, FULL_ALPHA);
-            result.put(new Line(cx,      cz,      cx + 16, cz + 16), color);
-            result.put(new Line(cx + 16, cz,      cx,      cz + 16), color);
+        // Two-phase capture/annex model: a single diagonal per captured (occupied-not-
+        // annexed) node, drawn in the occupier's color. The node's base fill still shows
+        // the losing nation's color underneath — the diagonal is the marker that a
+        // takeover is in-progress but not yet finalized. Removed on annex.
+        List<Seg> diagonals = new ArrayList<>();
+        for (String tid : mapData.capturedTerritoryIds) {
+            List<AechronisMapData.NodeBorderLine> segments = mapData.territoryDiagonals.get(tid);
+            Integer color = mapData.territoryDiagonalColors.get(tid);
+            if (segments == null || color == null) continue;
+            for (AechronisMapData.NodeBorderLine d : segments) {
+                diagonals.add(new Seg(d.x1, d.z1, d.x2, d.z2, withAlpha(color, FULL_ALPHA), cfg.occupiedDiagonalWidth));
+            }
         }
-        return result;
-    }
 
-    // ---- Under-attack stripes (single diagonal per chunk, attacker's nation color) ----
-    // Purge runs before the early-returns for the same reason as getWarChunks() above —
-    // this getter is the only cleanup path for mapData.underAttackChunks and keeps being
-    // called on its interval regardless of config toggles or current dimension.
-    private Object2IntMap<Line> getUnderAttackStripes(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        long now = System.currentTimeMillis();
-        mapData.underAttackChunks.entrySet().removeIf(e -> (now - e.getValue().startTime) > ATTACK_TIMEOUT_MS);
-
-        Object2IntOpenHashMap<Line> result = new Object2IntOpenHashMap<>();
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return result;
-        if (!cfg.showUnderAttackStripes) return result;
-        if (!isCrusalisDimension(dimension)) return result;
-
-        for (Map.Entry<Long, AechronisMapData.UnderAttackChunk> e : mapData.underAttackChunks.entrySet()) {
-            int cx = ChunkPos.getX(e.getKey()) * 16;
-            int cz = ChunkPos.getZ(e.getKey()) * 16;
-            result.put(new Line(cx, cz, cx + 16, cz + 16), withAlpha(e.getValue().color, FULL_ALPHA));
+        // Per-chunk war visuals (Version B). Solid recolor + X on recently captured chunks
+        // (one toggle controls both, matching AechronisConfig's showWarStripes doc), and a
+        // single attacker-colored diagonal on chunks with a flag currently planted.
+        List<Rect> warFills = new ArrayList<>();
+        List<Seg> stripes = new ArrayList<>();
+        if (cfg.showWarStripes) {
+            int alpha = cfg.getNationFillAlpha();
+            for (Map.Entry<Long, AechronisMapData.WarChunk> e : mapData.warChunks.entrySet()) {
+                int x = ChunkPos.getX(e.getKey()) << 4, z = ChunkPos.getZ(e.getKey()) << 4;
+                int rgb = e.getValue().color;
+                warFills.add(new Rect(x, z, x + 16, z + 16, withAlpha(rgb, alpha)));
+                stripes.add(new Seg(x, z, x + 16, z + 16, withAlpha(rgb, FULL_ALPHA), cfg.warStripeWidth));
+                stripes.add(new Seg(x + 16, z, x, z + 16, withAlpha(rgb, FULL_ALPHA), cfg.warStripeWidth));
+            }
         }
-        return result;
-    }
-
-    // ---- Node labels — plain text, uniform color, cached on data change ----
-    private Long2ObjectOpenHashMap<Text> getNodeTexts(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
-        if (!cfg.showNodeLabels) return new Long2ObjectOpenHashMap<>();
-        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
-
-        if (mapData.dirty || mapData.nodeLabelInfos.size() != lastLabelCount) {
-            rebuildNodeTextsCache();
-            lastLabelCount = mapData.nodeLabelInfos.size();
+        if (cfg.showUnderAttackStripes) {
+            for (Map.Entry<Long, AechronisMapData.UnderAttackChunk> e : mapData.underAttackChunks.entrySet()) {
+                int x = ChunkPos.getX(e.getKey()) << 4, z = ChunkPos.getZ(e.getKey()) << 4;
+                stripes.add(new Seg(x, z, x + 16, z + 16, withAlpha(e.getValue().color, FULL_ALPHA), cfg.underAttackStripeWidth));
+            }
         }
-        return cachedNodeTexts;
+        return new Scene(nationFills, nodeBorders, diagonals, warFills, stripes, labels);
     }
 
-    private void rebuildNodeTextsCache() {
-        Long2ObjectOpenHashMap<Text> newCache = new Long2ObjectOpenHashMap<>(mapData.nodeLabelInfos.size());
-        for (Map.Entry<Long, AechronisMapData.NodeLabelInfo> e : mapData.nodeLabelInfos.entrySet()) {
-            AechronisMapData.NodeLabelInfo info = e.getValue();
-            // Per-resource color (diamonds/gold/iron get their own; others white),
-            // carried on the label itself. Full alpha so text stays legible.
-            int textColor = (0xFF << 24) | (info.color & 0x00FFFFFF);
-            newCache.put((long) e.getKey(), new Text(info.label, info.x, info.z, textColor, 0.5f));
+    /**
+     * Merges chunk -> ARGB into rectangles: same-color runs along X, then identical runs on
+     * consecutive rows stacked along Z. Cuts vertex count by an order of magnitude on nation
+     * territory and keeps translucent fills free of seams.
+     */
+    static List<Rect> mergeChunks(Long2LongMap chunks) {
+        // Sort by row (z), then x. x is stored sign-flipped so negative x sorts before positive.
+        long[] sorted = chunks.keySet().toLongArray();
+        for (int i = 0; i < sorted.length; i++) {
+            long k = sorted[i];
+            sorted[i] = ((long) ChunkPos.getZ(k) << 32) | ((ChunkPos.getX(k) ^ Integer.MIN_VALUE) & 0xFFFFFFFFL);
         }
-        cachedNodeTexts = newCache;
-    }
+        java.util.Arrays.sort(sorted);
 
-    // ---- Town labels — plain text showing town name, separate toggle from node labels ----
-    private Long2ObjectOpenHashMap<Text> getTownTexts(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
-        if (!cfg.showTownLabels) return new Long2ObjectOpenHashMap<>();
-        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
-
-        if (mapData.dirty || mapData.townLabelInfos.size() != lastTownLabelCount) {
-            rebuildTownTextsCache();
-            lastTownLabelCount = mapData.townLabelInfos.size();
+        List<Rect> out = new ArrayList<>();
+        // Open rects from the previous row, keyed by (x1, x2, color); value = [z1].
+        Map<List<Integer>, int[]> open = new HashMap<>();
+        int i = 0;
+        while (i < sorted.length) {
+            int z = (int) (sorted[i] >> 32);
+            Map<List<Integer>, int[]> next = new HashMap<>();
+            while (i < sorted.length && (int) (sorted[i] >> 32) == z) {
+                int x1 = rowX(sorted[i]);
+                int color = (int) chunks.get(ChunkPos.asLong(x1, z));
+                int x2 = x1;
+                i++;
+                while (i < sorted.length && (int) (sorted[i] >> 32) == z && rowX(sorted[i]) == x2 + 1
+                        && (int) chunks.get(ChunkPos.asLong(x2 + 1, z)) == color) {
+                    x2++;
+                    i++;
+                }
+                List<Integer> key = List.of(x1, x2, color);
+                int[] startZ = open.remove(key);
+                next.put(key, startZ != null ? startZ : new int[]{z});
+            }
+            // Runs that didn't continue into this row (or a gap of rows) are finished.
+            int prevZ = z - 1;
+            open.forEach((k, s) -> out.add(chunkRect(k, s[0], prevZ)));
+            open = next;
+            // A run only continues if the very next row has it; flush if rows were skipped.
+            if (i < sorted.length && (int) (sorted[i] >> 32) != z + 1) {
+                open.forEach((k, s) -> out.add(chunkRect(k, s[0], z)));
+                open = new HashMap<>();
+            }
         }
-        return cachedTownTexts;
-    }
-
-    private void rebuildTownTextsCache() {
-        Long2ObjectOpenHashMap<Text> newCache = new Long2ObjectOpenHashMap<>(mapData.townLabelInfos.size());
-        int textColor = (0xFF << 24) | 0xFFFFFF;
-        for (Map.Entry<Long, AechronisMapData.NodeLabelInfo> e : mapData.townLabelInfos.entrySet()) {
-            AechronisMapData.NodeLabelInfo info = e.getValue();
-            newCache.put((long) e.getKey(), new Text(info.label, info.x, info.z, textColor, 0.5f));
+        if (sorted.length > 0) {
+            int lastZ = (int) (sorted[sorted.length - 1] >> 32);
+            open.forEach((k, s) -> out.add(chunkRect(k, s[0], lastZ)));
         }
-        cachedTownTexts = newCache;
+        return List.copyOf(out);
     }
 
-    // ---- Nation labels — bigger text than node/town labels, at nation capital (offset) ----
-    private static final float NATION_LABEL_SCALE = 0.9f;
-    private Long2ObjectOpenHashMap<Text> getNationTexts(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
-        if (!cfg.showNationLabels) return new Long2ObjectOpenHashMap<>();
-        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
+    private static int rowX(long sortKey) {
+        return (int) sortKey ^ Integer.MIN_VALUE;
+    }
 
-        if (mapData.dirty || mapData.nationLabelInfos.size() != lastNationLabelCount) {
-            rebuildNationTextsCache();
-            lastNationLabelCount = mapData.nationLabelInfos.size();
+    private static Rect chunkRect(List<Integer> run, int z1, int z2) {
+        return new Rect(run.get(0) << 4, z1 << 4, (run.get(1) + 1) << 4, (z2 + 1) << 4, run.get(2));
+    }
+
+    // ---- Drawing: geometry into the map framebuffer ----
+
+    /**
+     * @param pose          map pose whose units are blocks relative to (originX, originZ)
+     * @param pxPerBlock    framebuffer pixels per block (world map fboScale, minimap zoom)
+     * @param minX..maxZ    visible block area, for culling
+     */
+    public static void drawGeometry(ResourceKey<Level> mapDimension, Matrix4f pose, VertexConsumer buf,
+                                    int originX, int originZ, double pxPerBlock,
+                                    double minX, double minZ, double maxX, double maxZ) {
+        Scene s = sceneFor(mapDimension);
+        if (s == Scene.EMPTY) return;
+        // Margin covers line caps sticking out of their segment's bounds.
+        double m = 32 / pxPerBlock + 8;
+        double x0 = minX - m, z0 = minZ - m, x1 = maxX + m, z1 = maxZ + m;
+
+        fills(s.nationFills, pose, buf, originX, originZ, x0, z0, x1, z1);
+        lines(s.nodeBorders, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+        lines(s.occupiedDiagonals, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+        fills(s.warFills, pose, buf, originX, originZ, x0, z0, x1, z1);
+        lines(s.warStripes, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+    }
+
+    private static void fills(List<Rect> rects, Matrix4f pose, VertexConsumer buf, int ox, int oz,
+                              double x0, double z0, double x1, double z1) {
+        for (Rect r : rects) {
+            if (r.x2 < x0 || r.x1 > x1 || r.z2 < z0 || r.z1 > z1) continue;
+            quad(pose, buf, r.x1 - ox, r.z1 - oz, r.x2 - ox, r.z1 - oz, r.x2 - ox, r.z2 - oz, r.x1 - ox, r.z2 - oz, r.argb);
         }
-        return cachedNationTexts;
     }
 
-    private void rebuildNationTextsCache() {
-        Long2ObjectOpenHashMap<Text> newCache = new Long2ObjectOpenHashMap<>(mapData.nationLabelInfos.size());
-        for (AechronisMapData.NationLabelInfo info : mapData.nationLabelInfos) {
-            int textColor = (0xFF << 24) | (info.color & 0x00FFFFFF);
-            long key = ChunkPos.asLong(info.x >> 4, info.z >> 4);
-            newCache.put(key, new Text(info.label, info.x, info.z, textColor, NATION_LABEL_SCALE));
+    private static void lines(List<Seg> segs, Matrix4f pose, VertexConsumer buf, int ox, int oz, double pxPerBlock,
+                              double x0, double z0, double x1, double z1) {
+        for (Seg l : segs) {
+            if (Math.max(l.x1, l.x2) < x0 || Math.min(l.x1, l.x2) > x1
+                    || Math.max(l.z1, l.z2) < z0 || Math.min(l.z1, l.z2) > z1) continue;
+            float dx = l.x2 - l.x1, dz = l.z2 - l.z1;
+            float len = Mth.sqrt(dx * dx + dz * dz);
+            if (len == 0) continue;
+            // XaeroPlus-compatible width: 16 * width blocks, but at least 1.6 framebuffer pixels.
+            float half = (float) (8 * Math.max(l.width * pxPerBlock, 0.1) / pxPerBlock);
+            float ux = dx / len * half, uz = dz / len * half; // along the line, half-width long
+            float px = -uz, pz = ux;                           // perpendicular
+            // Square caps (extend by half the width) so border corners join without notches.
+            float ax = l.x1 - ox - ux, az = l.z1 - oz - uz;
+            float bx = l.x2 - ox + ux, bz = l.z2 - oz + uz;
+            quad(pose, buf, ax + px, az + pz, bx + px, bz + pz, bx - px, bz - pz, ax - px, az - pz, l.argb);
         }
-        cachedNationTexts = newCache;
     }
 
-    // ---- Port markers — name label at each port, colored by group ----
-    private Long2ObjectOpenHashMap<Text> getPortTexts(int wx, int wz, int wSize, ResourceKey<Level> dimension) {
-        AechronisConfig cfg = AechronisConfig.get();
-        if (!cfg.showEverything) return new Long2ObjectOpenHashMap<>();
-        if (!cfg.showPorts) return new Long2ObjectOpenHashMap<>();
-        if (!isCrusalisDimension(dimension)) return new Long2ObjectOpenHashMap<>();
+    private static void quad(Matrix4f pose, VertexConsumer buf, float ax, float az, float bx, float bz,
+                             float cx, float cz, float dx, float dz, int argb) {
+        buf.addVertex(pose, ax, az, 0).setColor(argb);
+        buf.addVertex(pose, bx, bz, 0).setColor(argb);
+        buf.addVertex(pose, cx, cz, 0).setColor(argb);
+        buf.addVertex(pose, dx, dz, 0).setColor(argb);
+    }
 
-        if (mapData.ports.size() != lastPortCount) {
-            rebuildPortTextsCache();
-            lastPortCount = mapData.ports.size();
+    // ---- Drawing: labels, after the map is composited ----
+
+    /**
+     * World map. pose has units of blocks with the camera at the origin.
+     * Text size matches the XaeroPlus version: one font pixel per framebuffer pixel at scale 0.5.
+     */
+    public static void drawWorldMapLabels(ResourceKey<Level> mapDimension, Matrix4f pose, MultiBufferSource buf,
+                                          double cameraX, double cameraZ, double fboScale,
+                                          double minX, double minZ, double maxX, double maxZ) {
+        Scene s = sceneFor(mapDimension);
+        if (s.labels.isEmpty()) return;
+        Font font = Minecraft.getInstance().font;
+        float blocksPerFontPixel = (float) (2 * Mth.clamp(1 / fboScale, 0.1, 1000));
+        for (Label l : s.labels) {
+            if (l.x < minX || l.x > maxX || l.z < minZ || l.z > maxZ) continue;
+            label(font, buf, new Matrix4f(pose).translate((float) (l.x - cameraX), (float) (l.z - cameraZ), 0),
+                    l, l.scale * blocksPerFontPixel);
         }
-        return cachedPortTexts;
     }
 
-    private void rebuildPortTextsCache() {
-        Long2ObjectOpenHashMap<Text> newCache = new Long2ObjectOpenHashMap<>(mapData.ports.size());
-        for (AechronisMapData.PortInfo p : mapData.ports) {
-            int textColor = (0xFF << 24) | (p.color & 0x00FFFFFF);
-            long key = ChunkPos.asLong(p.x >> 4, p.z >> 4);
-            newCache.put(key, new Text(p.name, p.x, p.z, textColor, 0.4f));
+    /**
+     * Minimap, in Xaero's over-map element space: origin at the minimap centre, rotation
+     * given by (ps, pc), scaledZoom units per block. Labels whose anchor is outside the
+     * visible map are skipped.
+     */
+    public static void drawMinimapLabels(ResourceKey<Level> mapDimension, Matrix4f pose, MultiBufferSource buf,
+                                         double renderX, double renderZ, double ps, double pc, double scaledZoom,
+                                         int halfView, boolean circle, float minimapScale) {
+        Scene s = sceneFor(mapDimension);
+        if (s.labels.isEmpty()) return;
+        Font font = Minecraft.getInstance().font;
+        double zoom = 2 * scaledZoom / minimapScale; // framebuffer pixels per block
+        // One framebuffer pixel is minimapScale/2 units here; font pixels per framebuffer
+        // pixel = 2 * scale, never smaller than 0.2 * zoom (same clamp as the world map).
+        float unitsPerFontPixel = (float) (minimapScale * Math.max(1, 0.1 * zoom));
+        for (Label l : s.labels) {
+            double offX = l.x - renderX, offZ = l.z - renderZ;
+            double x = (ps * offX - pc * offZ) * scaledZoom;
+            double y = (pc * offX + ps * offZ) * scaledZoom;
+            if (circle ? x * x + y * y > (double) halfView * halfView
+                    : Math.abs(x) > halfView || Math.abs(y) > halfView) continue;
+            label(font, buf, new Matrix4f(pose).translate((float) x, (float) y, 0), l, l.scale * unitsPerFontPixel);
         }
-        cachedPortTexts = newCache;
     }
 
-    // ---- Helpers ----
+    private static void label(Font font, MultiBufferSource buf, Matrix4f m, Label l, float scale) {
+        m.scale(scale, scale, 1).translate(-font.width(l.text) / 2f, -4.5f, 0);
+        font.drawInBatch(l.text, 0, 0, l.argb, true, m, buf, Font.DisplayMode.SEE_THROUGH, 0, 0xF000F0);
+    }
 
-    /** Apply alpha to raw RGB — returns ARGB int */
-    private int withAlpha(int rgb, int alpha) {
+    private static int withAlpha(int rgb, int alpha) {
         return (alpha << 24) | (rgb & 0x00FFFFFF);
     }
 }

@@ -1,4 +1,4 @@
-package com.dcfiendish.aechronismapmod.spike;
+package com.dcfiendish.aechronismapmod;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -14,13 +14,13 @@ import java.util.ArrayDeque;
 import java.util.Queue;
 
 /**
- * Dev-only self-test for the hook spike (-Dcrusalis.hookSpike.autotest=true, plus
- * -Dcrusalis.hookSpike=true for the quads). Once in a singleplayer world it parks the
+ * Dev-only self-test (-Dcrusalis.autotest=true, with
+ * -Dcrusalis.devForceActive=true for live data). Once in a singleplayer world it parks the
  * player (spectator, so it stays put) at block 34,18 (chunk 2,1, next to chunk 0,0), screenshots the minimap in every
  * rotation/shape combination and the world map at several zooms, logs the world map
  * camera so the screenshots can be checked pixel-exact, then quits.
  */
-public class HookSpikeAutoTest implements ClientModInitializer {
+public class DevAutoTest implements ClientModInitializer {
     private record Step(int waitTicks, Runnable action) {}
 
     private final Queue<Step> steps = new ArrayDeque<>();
@@ -28,7 +28,7 @@ public class HookSpikeAutoTest implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        if (!Boolean.getBoolean("crusalis.hookSpike.autotest")) return;
+        if (!Boolean.getBoolean("crusalis.autotest")) return;
         Minecraft mc = Minecraft.getInstance();
 
         step(100, () -> {
@@ -89,7 +89,7 @@ public class HookSpikeAutoTest implements ClientModInitializer {
 
     private static void shot(String name) {
         Minecraft mc = Minecraft.getInstance();
-        Screenshot.grab(mc.gameDirectory, "hookspike_" + name + ".png", mc.getMainRenderTarget(), 1,
+        Screenshot.grab(mc.gameDirectory, "autotest_" + name + ".png", mc.getMainRenderTarget(), 1,
                 msg -> System.out.println("[HookSpike] " + msg.getString()));
     }
 
