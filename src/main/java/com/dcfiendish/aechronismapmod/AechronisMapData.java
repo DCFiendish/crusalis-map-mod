@@ -59,6 +59,8 @@ public class AechronisMapData {
     // poll (cheap, proportional to nation count). Filler nations (Impassable, Wilderness)
     // are skipped. Keyed by a synthetic position key like the others.
     public volatile List<NationLabelInfo> nationLabelInfos = new ArrayList<>();
+    /** Node type (lower case, e.g. "wheat") -> map.crusalis.net icon key (e.g. "wheat"), from world.json "nodes". */
+    public volatile Map<String, String> nodeTypeIcons = Map.of();
     public volatile List<TownWaypoint> townWaypoints = new ArrayList<>();
     public volatile Map<String, String> townNationMap = new HashMap<>();
     // Player username -> nation. Built each towns.json poll from each town's
@@ -69,10 +71,6 @@ public class AechronisMapData {
     // USERNAME from chat (see AechronisChatListener) to a nation color — the
     // chat broadcast never contains a town name, only the acting player's name.
     public volatile Map<String, String> playerNationMap = new HashMap<>();
-
-    // ── Ports (from ports.json, fetched ONCE — ports are static) ────────────
-    // Each port: name + (x,z) + group ids, colored by group. Built once in loadPortData().
-    public volatile List<PortInfo> ports = new ArrayList<>();
 
     // ── Occupation / annexation (captured-but-not-annexed) tracking ─────────
     // Per Nodes plugin mechanics (confirmed via https://nodes.soy/4-2-diplomacy-war.html):
@@ -154,64 +152,18 @@ public class AechronisMapData {
      */
     public void loadWorldData(JsonObject world) {
         this.worldData = world;
-        rebuildGeometry(world);
-    }
-
-    /**
-     * Called once per session (ports are static). Parses ports.json:
-     *   { "meta": {...}, "ports": { "<name>": { "x":.., "z":.., "groups":[".."] }, ... } }
-     * Builds a flat list of port markers (name + position + group-derived color). Group
-     * color is assigned from a fixed palette, deterministically by first-seen group
-     * order within this load.
-     */
-    public void loadPortData(JsonObject portsJson) {
-        List<PortInfo> newPorts = new ArrayList<>();
-        Map<String, Integer> groupColor = new LinkedHashMap<>(); // group id -> color
-
-        JsonObject portsObj = portsJson.has("ports") && !portsJson.get("ports").isJsonNull()
-                ? portsJson.getAsJsonObject("ports") : new JsonObject();
-
-        for (Map.Entry<String, JsonElement> e : portsObj.entrySet()) {
-            String name = e.getKey();
-            JsonObject p = e.getValue().getAsJsonObject();
-            if (!p.has("x") || !p.has("z") || p.get("x").isJsonNull() || p.get("z").isJsonNull()) continue;
-            int x = p.get("x").getAsInt();
-            int z = p.get("z").getAsInt();
-
-            List<String> groups = new ArrayList<>();
-            if (p.has("groups") && !p.get("groups").isJsonNull()) {
-                for (JsonElement g : p.getAsJsonArray("groups")) {
-                    if (!g.isJsonNull()) groups.add(g.getAsString());
+        Map<String, String> icons = new HashMap<>();
+        if (world.has("nodes") && world.get("nodes").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> e : world.getAsJsonObject("nodes").entrySet()) {
+                JsonObject node = e.getValue().getAsJsonObject();
+                if (node.has("icon") && !node.get("icon").isJsonNull()) {
+                    icons.put(e.getKey().toLowerCase(java.util.Locale.ROOT), node.get("icon").getAsString());
                 }
             }
-
-            // Color from the FIRST group (deterministic palette by first-seen order).
-            int color = 0xFFFFFF;
-            if (!groups.isEmpty()) {
-                String firstGroup = groups.get(0);
-                color = groupColor.computeIfAbsent(firstGroup,
-                        k -> PORT_GROUP_PALETTE[groupColor.size() % PORT_GROUP_PALETTE.length]);
-            }
-
-            newPorts.add(new PortInfo(name, x, z, color));
         }
-
-        this.ports = newPorts;
-        System.out.println("[Crusalis] Loaded " + newPorts.size() + " ports, " +
-                groupColor.size() + " groups.");
+        this.nodeTypeIcons = Map.copyOf(icons);
+        rebuildGeometry(world);
     }
-
-    // Fixed palette for port groups — distinct, readable hues. Cycled by group order.
-    private static final int[] PORT_GROUP_PALETTE = {
-            0x00FFFF, // cyan
-            0xFF00FF, // magenta
-            0xFFAA00, // orange
-            0x00FF00, // green
-            0xFF5555, // red
-            0x5555FF, // blue
-            0xFFFF00, // yellow
-            0xAA00FF  // purple
-    };
 
     private void rebuildGeometry(JsonObject world) {
         JsonObject territories = world.has("territories") ?
@@ -315,7 +267,8 @@ public class AechronisMapData {
                     int labelColor = nodeLabelColor(labelTypes.get(0));
 
                     long textKey = ChunkPos.asLong(labelX >> 4, labelZ >> 4);
-                    newLabelInfos.put(textKey, new NodeLabelInfo(label.toString(), labelX, labelZ, labelColor));
+                    newLabelInfos.put(textKey, new NodeLabelInfo(label.toString(), labelX, labelZ, labelColor,
+                            labelTypes.stream().map(t -> t.toLowerCase(java.util.Locale.ROOT)).toList()));
                 }
             }
         }
@@ -1119,11 +1072,13 @@ public class AechronisMapData {
         public final String label;
         public final int x, z;
         public final int color; // RGB, no alpha
+        /** Node types in label order, lower case (e.g. "wheat", "ultra-mega-node"); empty for towns. */
+        public final List<String> resources;
         public NodeLabelInfo(String label, int x, int z) {
-            this(label, x, z, 0xFFFFFF);
+            this(label, x, z, 0xFFFFFF, List.of());
         }
-        public NodeLabelInfo(String label, int x, int z, int color) {
-            this.label = label; this.x = x; this.z = z; this.color = color;
+        public NodeLabelInfo(String label, int x, int z, int color, List<String> resources) {
+            this.label = label; this.x = x; this.z = z; this.color = color; this.resources = resources;
         }
     }
 
@@ -1134,16 +1089,6 @@ public class AechronisMapData {
         public final int color; // RGB, no alpha
         public NationLabelInfo(String label, int x, int z, int color) {
             this.label = label; this.x = x; this.z = z; this.color = color;
-        }
-    }
-
-    /** A port marker — name + position + group-derived RGB color. */
-    public static class PortInfo {
-        public final String name;
-        public final int x, z;
-        public final int color; // RGB, no alpha
-        public PortInfo(String name, int x, int z, int color) {
-            this.name = name; this.x = x; this.z = z; this.color = color;
         }
     }
 

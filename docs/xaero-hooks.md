@@ -186,6 +186,36 @@ radar icons and player arrow upright over the composited map.
 - Minimap: the dimension is the `mapDimension` argument or local, which is the dimension of
   the map being shown, not necessarily the one the player is in.
 
+## Layers and settings
+
+Settings open with the **O** key (Controls > Crusalis Map) or through Mod Menu. They are
+grouped into five tabs: Overlay, War, Labels, Chunk Grid and Icons.
+
+- **Chunk grid:** drawn in the geometry pass, above the nation fills and below the borders and
+  war markers. It shows in every dimension while the mod is active, because it isn't
+  Crusalis data. It is skipped when a chunk would be under 8 framebuffer pixels wide.
+  Color, opacity and line width (in pixels) are configurable.
+- **Node borders:** hidden when the map shows fewer than `hideBordersBelowZoom` pixels per
+  block (default 0.5, so the world map at 0.25× has no borders). The `autoHideBorders`
+  setting turns this off.
+- **Icons:** drawn in the label pass as a row centred on the marker, with the text below.
+  They stay a fixed size on screen (`iconSize`, in GUI pixels, default 8). They have their
+  own toggle, separate from the text toggles. Each node gets one icon per type. Each type
+  resolves through `AechronisIcons` in this order:
+  1. The player's own `config/aechronismapmod/icons/node_<type>.png`.
+  2. The map.crusalis.net icon. World.json `nodes.<type>.icon` gives a key, which
+     `nodes/resource_icons.json` / `nodes/resource_icons_custom.json` map to an
+     `images/nodes/...png`. It is downloaded once into `icons/cache/`, and only after
+     joining Crusalis.
+  3. The vanilla `minecraft:textures/item/<key>.png`.
+  4. The player's `node_default.png`.
+
+  Towns and nation capitals use only `town.png` and `nation.png`.
+- **Resource filter:** `resourceFilter` (a node type such as `wheat`, or empty for all)
+  limits node icons and labels to nodes of that type. The "Cycle Resource Filter" key is
+  unbound by default. It steps through the types present in the data and shows the
+  current filter on the action bar.
+
 ## Test results
 
 To reproduce:
@@ -255,7 +285,10 @@ chunk grid and hover highlight at 0.5× to 16× and in every minimap mode.
   believed to share the `xaero.common` / `xaero.hud` classes, but that hasn't been tested.
   `fabric.mod.json` therefore only *suggests* `xaerominimap`. Without a minimap, the minimap
   mixins find no target and are skipped, with a warning in the log.
-- **Build:** Mod Menu 15.0.0 crashes the 1.21.11 dev client, so it is `modCompileOnly`.
+- **Build:**
+  - The dev client runs Mod Menu 17.0.1, the 1.21.11 line. Mod Menu 15.x crashed it.
+  - Cloth Config comes from maven.shedaniel.me, because the Modrinth artifact doesn't pull
+    in cloth-basic-math, and the settings screen then fails with `ClassNotFoundException`.
 - **Dev profile:** `run/debug-profile.json` remembers F3 toggles. If vanilla chunk borders
   are left "always on" there, they show up in the self-test screenshots as coloured lines in
   the world.

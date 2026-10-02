@@ -6,6 +6,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.ChunkPos;
@@ -41,7 +42,6 @@ public final class AechronisRenderer {
 
     private static final float NODE_LABEL_SCALE = 0.5f;
     private static final float NATION_LABEL_SCALE = 0.9f;
-    private static final float PORT_LABEL_SCALE = 0.4f;
 
     // Timeouts for per-chunk war visuals (Version B).
     //
@@ -64,20 +64,25 @@ public final class AechronisRenderer {
 
     record Rect(int x1, int z1, int x2, int z2, int argb) {}
     record Seg(int x1, int z1, int x2, int z2, int argb, float width) {}
-    record Label(String text, int x, int z, int argb, float scale) {}
+    /** text may be null (icons only); icons are drawn as a row centred on the anchor, text below. */
+    record Label(String text, int x, int z, int argb, float scale, List<AechronisIcons.Icon> icons) {}
 
     /** Everything one frame draws, in draw order. Swapped atomically, never mutated. */
     private record Scene(List<Rect> nationFills, List<Seg> nodeBorders, List<Seg> occupiedDiagonals,
-                         List<Rect> warFills, List<Seg> warStripes, List<Label> labels) {
-        static final Scene EMPTY = new Scene(List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+                         List<Rect> warFills, List<Seg> warStripes, List<Label> labels,
+                         int gridArgb, int gridWidthPx, int iconSize, float hideBordersBelow) {
+        static final Scene EMPTY = new Scene(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+                0, 0, 0, 0);
     }
 
     /** The config values the static layers depend on; a change triggers a rebuild. */
     private record StaticConfig(boolean everything, boolean fills, int fillAlpha, boolean borders, boolean white,
-                                boolean nodeLabels, boolean townLabels, boolean nationLabels, boolean ports) {
+                                boolean nodeLabels, boolean townLabels, boolean nationLabels, boolean icons,
+                                String filter) {
         static StaticConfig of(AechronisConfig c) {
             return new StaticConfig(c.showEverything, c.showNationFills, c.getNationFillAlpha(), c.showNodeBorders,
-                    c.whiteBorders, c.showNodeLabels, c.showTownLabels, c.showNationLabels, c.showPorts);
+                    c.whiteBorders, c.showNodeLabels, c.showTownLabels, c.showNationLabels, c.showIcons,
+                    c.resourceFilter.trim().toLowerCase(java.util.Locale.ROOT));
         }
     }
 
@@ -88,7 +93,7 @@ public final class AechronisRenderer {
     // Static layers, rebuilt only on data/config change.
     private static StaticConfig lastConfig;
     private static int lastBorderCount = -1, lastNodeLabelCount = -1, lastTownLabelCount = -1,
-            lastNationLabelCount = -1, lastPortCount = -1;
+            lastNationLabelCount = -1;
     private static List<Rect> nationFills = List.of();
     private static List<Seg> nodeBorders = List.of();
     private static List<Label> labels = List.of();
@@ -139,6 +144,34 @@ public final class AechronisRenderer {
         scene = buildScene(cfg);
     }
 
+    /** Node types present in the data, sorted, for the resource filter. */
+    public static List<String> resourceTypes() {
+        if (mapData == null) return List.of();
+        java.util.TreeSet<String> types = new java.util.TreeSet<>();
+        for (AechronisMapData.NodeLabelInfo i : mapData.nodeLabelInfos.values()) types.addAll(i.resources);
+        return List.copyOf(types);
+    }
+
+    private static List<AechronisIcons.Icon> icons(boolean show, List<String> nodeTypes) {
+        if (!show) return List.of();
+        List<AechronisIcons.Icon> out = new ArrayList<>();
+        for (String type : nodeTypes) {
+            AechronisIcons.Icon icon = AechronisIcons.forNodeType(type);
+            if (icon != null && !out.contains(icon)) out.add(icon);
+        }
+        return List.copyOf(out);
+    }
+
+    private static List<AechronisIcons.Icon> icon(boolean show, String name) {
+        AechronisIcons.Icon icon = show ? AechronisIcons.get(name) : null;
+        return icon == null ? List.of() : List.of(icon);
+    }
+
+    /** Re-resolves icons on the next tick (after icons reload or new node types arrive). */
+    public static void invalidate() {
+        lastConfig = null;
+    }
+
     private static void rebuildStaticIfNeeded(AechronisConfig cfg) {
         StaticConfig sc = StaticConfig.of(cfg);
         boolean dirty = mapData.dirty;
@@ -146,8 +179,7 @@ public final class AechronisRenderer {
                 && mapData.nodeBorderLines.size() == lastBorderCount
                 && mapData.nodeLabelInfos.size() == lastNodeLabelCount
                 && mapData.townLabelInfos.size() == lastTownLabelCount
-                && mapData.nationLabelInfos.size() == lastNationLabelCount
-                && mapData.ports.size() == lastPortCount) {
+                && mapData.nationLabelInfos.size() == lastNationLabelCount) {
             return;
         }
         // Clear before reading so a concurrent update during the rebuild flags it again.
@@ -157,7 +189,6 @@ public final class AechronisRenderer {
         lastNodeLabelCount = mapData.nodeLabelInfos.size();
         lastTownLabelCount = mapData.townLabelInfos.size();
         lastNationLabelCount = mapData.nationLabelInfos.size();
-        lastPortCount = mapData.ports.size();
 
         nationFills = sc.everything && sc.fills ? mergeChunks(mapData.buildAlphaCache(sc.fillAlpha)) : List.of();
 
@@ -172,36 +203,33 @@ public final class AechronisRenderer {
 
         List<Label> out = new ArrayList<>();
         if (sc.everything) {
-            if (sc.nodeLabels) {
+            // Text and icons have separate toggles; a marker with neither is dropped.
+            for (AechronisMapData.NodeLabelInfo i : mapData.nodeLabelInfos.values()) {
+                // The resource filter singles out one node type (towns/nations unaffected).
+                if (!sc.filter.isEmpty() && !i.resources.contains(sc.filter)) continue;
                 // Per-resource color (diamonds/gold/iron get their own; others white),
                 // carried on the label itself. Full alpha so text stays legible.
-                for (AechronisMapData.NodeLabelInfo i : mapData.nodeLabelInfos.values()) {
-                    out.add(new Label(i.label, i.x, i.z, withAlpha(i.color, FULL_ALPHA), NODE_LABEL_SCALE));
-                }
+                addLabel(out, sc.nodeLabels ? i.label : null, i.x, i.z, withAlpha(i.color, FULL_ALPHA),
+                        NODE_LABEL_SCALE, icons(sc.icons, i.resources));
             }
-            if (sc.townLabels) {
-                for (AechronisMapData.NodeLabelInfo i : mapData.townLabelInfos.values()) {
-                    out.add(new Label(i.label, i.x, i.z, withAlpha(0xFFFFFF, FULL_ALPHA), NODE_LABEL_SCALE));
-                }
+            for (AechronisMapData.NodeLabelInfo i : mapData.townLabelInfos.values()) {
+                addLabel(out, sc.townLabels ? i.label : null, i.x, i.z, withAlpha(0xFFFFFF, FULL_ALPHA),
+                        NODE_LABEL_SCALE, icon(sc.icons, "town"));
             }
-            if (sc.nationLabels) {
-                LongOpenHashSet seen = new LongOpenHashSet(); // one label per chunk, as before
-                for (AechronisMapData.NationLabelInfo i : mapData.nationLabelInfos) {
-                    if (seen.add(ChunkPos.asLong(i.x >> 4, i.z >> 4))) {
-                        out.add(new Label(i.label, i.x, i.z, withAlpha(i.color, FULL_ALPHA), NATION_LABEL_SCALE));
-                    }
-                }
-            }
-            if (sc.ports) {
-                LongOpenHashSet seen = new LongOpenHashSet();
-                for (AechronisMapData.PortInfo p : mapData.ports) {
-                    if (seen.add(ChunkPos.asLong(p.x >> 4, p.z >> 4))) {
-                        out.add(new Label(p.name, p.x, p.z, withAlpha(p.color, FULL_ALPHA), PORT_LABEL_SCALE));
-                    }
+            LongOpenHashSet seen = new LongOpenHashSet(); // one nation label per chunk, as before
+            for (AechronisMapData.NationLabelInfo i : mapData.nationLabelInfos) {
+                if (seen.add(ChunkPos.asLong(i.x >> 4, i.z >> 4))) {
+                    addLabel(out, sc.nationLabels ? i.label : null, i.x, i.z, withAlpha(i.color, FULL_ALPHA),
+                            NATION_LABEL_SCALE, icon(sc.icons, "nation"));
                 }
             }
         }
         labels = List.copyOf(out);
+    }
+
+    private static void addLabel(List<Label> out, String text, int x, int z, int argb, float scale,
+                                 List<AechronisIcons.Icon> icons) {
+        if (text != null || !icons.isEmpty()) out.add(new Label(text, x, z, argb, scale, icons));
     }
 
     /** The war/occupation layers: small and chat-driven, so simply rebuilt every tick. */
@@ -213,7 +241,7 @@ public final class AechronisRenderer {
         // the losing nation's color underneath — the diagonal is the marker that a
         // takeover is in-progress but not yet finalized. Removed on annex.
         List<Seg> diagonals = new ArrayList<>();
-        for (String tid : mapData.capturedTerritoryIds) {
+        for (String tid : cfg.showOccupiedDiagonals ? mapData.capturedTerritoryIds : java.util.Set.<String>of()) {
             List<AechronisMapData.NodeBorderLine> segments = mapData.territoryDiagonals.get(tid);
             Integer color = mapData.territoryDiagonalColors.get(tid);
             if (segments == null || color == null) continue;
@@ -243,7 +271,9 @@ public final class AechronisRenderer {
                 stripes.add(new Seg(x, z, x + 16, z + 16, withAlpha(e.getValue().color, FULL_ALPHA), cfg.underAttackStripeWidth));
             }
         }
-        return new Scene(nationFills, nodeBorders, diagonals, warFills, stripes, labels);
+        return new Scene(nationFills, nodeBorders, diagonals, warFills, stripes, labels,
+                cfg.showChunkGrid ? cfg.getChunkGridArgb() : 0, cfg.chunkGridWidth, cfg.iconSize,
+                cfg.autoHideBorders ? cfg.hideBordersBelowZoom : 0);
     }
 
     /**
@@ -316,17 +346,42 @@ public final class AechronisRenderer {
     public static void drawGeometry(ResourceKey<Level> mapDimension, Matrix4f pose, VertexConsumer buf,
                                     int originX, int originZ, double pxPerBlock,
                                     double minX, double minZ, double maxX, double maxZ) {
-        Scene s = sceneFor(mapDimension);
-        if (s == Scene.EMPTY) return;
+        Scene all = active ? scene : Scene.EMPTY;
         // Margin covers line caps sticking out of their segment's bounds.
         double m = 32 / pxPerBlock + 8;
         double x0 = minX - m, z0 = minZ - m, x1 = maxX + m, z1 = maxZ + m;
+        Scene s = isCrusalisDimension(mapDimension) ? all : Scene.EMPTY;
 
         fills(s.nationFills, pose, buf, originX, originZ, x0, z0, x1, z1);
-        lines(s.nodeBorders, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+        // The grid isn't Crusalis data: it shows in every dimension. Drawn over the nation
+        // fills (so it stays visible through them) but under borders and war markers.
+        grid(all, pose, buf, originX, originZ, pxPerBlock, minX, minZ, maxX, maxZ);
+        // Zoomed far out, borders merge into a mesh of lines: hide them below the threshold.
+        if (pxPerBlock >= s.hideBordersBelow) {
+            lines(s.nodeBorders, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+        }
         lines(s.occupiedDiagonals, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
         fills(s.warFills, pose, buf, originX, originZ, x0, z0, x1, z1);
         lines(s.warStripes, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+    }
+
+    private static void grid(Scene s, Matrix4f pose, VertexConsumer buf, int ox, int oz, double pxPerBlock,
+                             double minX, double minZ, double maxX, double maxZ) {
+        // Skip when chunks are under 8 pixels: a zoomed-out map would just turn solid.
+        if (s.gridArgb == 0 || 16 * pxPerBlock < 8) return;
+        float half = (float) (s.gridWidthPx / 2.0 / pxPerBlock);
+        int cx0 = Mth.floor(minX / 16), cx1 = Mth.floor(maxX / 16) + 1;
+        int cz0 = Mth.floor(minZ / 16), cz1 = Mth.floor(maxZ / 16) + 1;
+        float zTop = (cz0 << 4) - oz, zBottom = (cz1 << 4) - oz;
+        float xLeft = (cx0 << 4) - ox, xRight = (cx1 << 4) - ox;
+        for (int cx = cx0; cx <= cx1; cx++) {
+            float x = (cx << 4) - ox;
+            quad(pose, buf, x - half, zTop, x + half, zTop, x + half, zBottom, x - half, zBottom, s.gridArgb);
+        }
+        for (int cz = cz0; cz <= cz1; cz++) {
+            float z = (cz << 4) - oz;
+            quad(pose, buf, xLeft, z - half, xRight, z - half, xRight, z + half, xLeft, z + half, s.gridArgb);
+        }
     }
 
     private static void fills(List<Rect> rects, Matrix4f pose, VertexConsumer buf, int ox, int oz,
@@ -377,10 +432,13 @@ public final class AechronisRenderer {
         if (s.labels.isEmpty()) return;
         Font font = Minecraft.getInstance().font;
         float blocksPerFontPixel = (float) (2 * Mth.clamp(1 / fboScale, 0.1, 1000));
+        var window = Minecraft.getInstance().getWindow();
+        // pose is in blocks; iconSize is in GUI pixels.
+        float iconBlocks = (float) (s.iconSize * window.getGuiScale() / (window.getWidth() / (maxX - minX)));
         for (Label l : s.labels) {
             if (l.x < minX || l.x > maxX || l.z < minZ || l.z > maxZ) continue;
             label(font, buf, new Matrix4f(pose).translate((float) (l.x - cameraX), (float) (l.z - cameraZ), 0),
-                    l, l.scale * blocksPerFontPixel);
+                    l, l.scale * blocksPerFontPixel, iconBlocks);
         }
     }
 
@@ -405,11 +463,28 @@ public final class AechronisRenderer {
             double y = (pc * offX + ps * offZ) * scaledZoom;
             if (circle ? x * x + y * y > (double) halfView * halfView
                     : Math.abs(x) > halfView || Math.abs(y) > halfView) continue;
-            label(font, buf, new Matrix4f(pose).translate((float) x, (float) y, 0), l, l.scale * unitsPerFontPixel);
+            label(font, buf, new Matrix4f(pose).translate((float) x, (float) y, 0), l, l.scale * unitsPerFontPixel,
+                    s.iconSize * minimapScale);
         }
     }
 
-    private static void label(Font font, MultiBufferSource buf, Matrix4f m, Label l, float scale) {
+    /** m is at the label's anchor; scale is units per font pixel, iconSize in the same units. */
+    private static void label(Font font, MultiBufferSource buf, Matrix4f m, Label l, float scale, float iconSize) {
+        if (!l.icons.isEmpty()) {
+            // A row of icons centred on the anchor (fixed on-screen size), text just below.
+            float h = iconSize / 2, step = iconSize * 1.1f;
+            float x = -step * (l.icons.size() - 1) / 2;
+            for (AechronisIcons.Icon icon : l.icons) {
+                VertexConsumer v = buf.getBuffer(RenderTypes.textSeeThrough(icon.texture()));
+                v.addVertex(m, x - h, -h, 0).setColor(-1).setUv(0, 0).setLight(0xF000F0);
+                v.addVertex(m, x - h, h, 0).setColor(-1).setUv(0, 1).setLight(0xF000F0);
+                v.addVertex(m, x + h, h, 0).setColor(-1).setUv(1, 1).setLight(0xF000F0);
+                v.addVertex(m, x + h, -h, 0).setColor(-1).setUv(1, 0).setLight(0xF000F0);
+                x += step;
+            }
+            if (l.text == null) return;
+            m.translate(0, h + 5.5f * scale, 0);
+        }
         m.scale(scale, scale, 1).translate(-font.width(l.text) / 2f, -4.5f, 0);
         font.drawInBatch(l.text, 0, 0, l.argb, true, m, buf, Font.DisplayMode.SEE_THROUGH, 0, 0xF000F0);
     }

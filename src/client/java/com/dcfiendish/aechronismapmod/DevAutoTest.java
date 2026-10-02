@@ -45,8 +45,8 @@ public class DevAutoTest implements ClientModInitializer {
             long chunk = d.buildAlphaCache(255).keySet().iterator().nextLong();
             int x = (net.minecraft.world.level.ChunkPos.getX(chunk) << 4) + 8;
             int z = (net.minecraft.world.level.ChunkPos.getZ(chunk) << 4) + 8;
-            System.out.printf("[AutoTest] data: nations=%d nodes=%d towns=%d ports=%d borders=%d target=%d,%d%n",
-                    d.nationLabelInfos.size(), d.nodeLabelInfos.size(), d.townLabelInfos.size(), d.ports.size(),
+            System.out.printf("[AutoTest] data: nations=%d nodes=%d towns=%d borders=%d target=%d,%d%n",
+                    d.nationLabelInfos.size(), d.nodeLabelInfos.size(), d.townLabelInfos.size(),
                     d.nodeBorderLines.size(), x, z);
             int cx = x >> 4, cz = z >> 4;
             long now = System.currentTimeMillis();
@@ -57,6 +57,7 @@ public class DevAutoTest implements ClientModInitializer {
                 d.territoryDiagonalColors.put(tid, 0x00FFFF);
             });
             command("tp @a " + (x + 0.5) + " 200 " + (z + 0.5) + " 30 60");
+            AechronisConfig.get().showChunkGrid = true;
             target[0] = x;
             target[1] = z;
         });
@@ -73,7 +74,15 @@ public class DevAutoTest implements ClientModInitializer {
         for (double zoom : new double[]{0.25, 1, 4, 16}) {
             worldMap(zoom, "wm_zoom_" + zoom);
         }
-        // Nether: both maps must be empty of Crusalis data.
+        // Resource filter (normally cycled with its keybind): only wheat nodes.
+        step(5, () -> AechronisConfig.get().resourceFilter = "wheat");
+        worldMap(0.25, "wm_filter_wheat");
+        step(5, () -> AechronisConfig.get().resourceFilter = "");
+        // Settings screen (normally the O key).
+        step(10, () -> mc.setScreen(me.shedaniel.autoconfig.AutoConfig.getConfigScreen(AechronisConfig.class, null).get()));
+        step(40, () -> shot("settings"));
+        step(5, () -> mc.setScreen(null));
+        // Nether: both maps must be empty of Crusalis data (the chunk grid still shows).
         step(10, () -> command("execute in minecraft:the_nether run tp @a " + target[0] + " 100 " + target[1]));
         step(200, () -> shot("nether_mm"));
         worldMap(1, "nether_wm");
