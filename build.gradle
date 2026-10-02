@@ -27,6 +27,7 @@ loom {
 			// `gradlew runClient -Pautotest`: screenshot both maps and quit (DevAutoTest).
 			if (project.hasProperty("autotest")) {
 				vmArgs "-Dcrusalis.autotest=true"
+				if (project.property("autotest") == "stay") vmArgs "-Dcrusalis.autotest.stay=true"
 				programArgs "--quickPlaySingleplayer", "HookSpike"
 			}
 		}

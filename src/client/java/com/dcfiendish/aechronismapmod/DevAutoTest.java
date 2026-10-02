@@ -14,11 +14,12 @@ import java.util.ArrayDeque;
 import java.util.Queue;
 
 /**
- * Dev-only self-test (-Dcrusalis.autotest=true, with
- * -Dcrusalis.devForceActive=true for live data). Once in a singleplayer world it parks the
- * player (spectator, so it stays put) at block 34,18 (chunk 2,1, next to chunk 0,0), screenshots the minimap in every
- * rotation/shape combination and the world map at several zooms, logs the world map
- * camera so the screenshots can be checked pixel-exact, then quits.
+ * Dev-only self-test (-Dcrusalis.autotest=true, with -Dcrusalis.devForceActive=true for live
+ * data; `gradlew runClient -Pautotest`). Once the live Crusalis data has loaded it parks the
+ * player (spectator) in a nation-held chunk, adds fake war / under-attack / occupied markers
+ * next to it, screenshots the minimap in every rotation/shape combination and the world map at
+ * several zooms, repeats one minimap + world map shot in the Nether (must be empty), then quits.
+ * Screenshots land in run/screenshots/autotest_*.png.
  */
 public class DevAutoTest implements ClientModInitializer {
     private record Step(int waitTicks, Runnable action) {}
@@ -33,16 +34,33 @@ public class DevAutoTest implements ClientModInitializer {
 
         step(100, () -> {
             mc.options.pauseOnLostFocus = false; // the dev window rarely has focus
-            var server = mc.getSingleplayerServer();
-            String name = mc.player.getGameProfile().name();
-            server.execute(() -> {
-                var src = server.createCommandSourceStack();
-                server.getCommands().performPrefixedCommand(src, "gamemode spectator " + name);
-                server.getCommands().performPrefixedCommand(src, "time set day");
-                server.getCommands().performPrefixedCommand(src, "tp " + name + " 34.5 200 18.5 30 60");
-            });
+            command("gamemode spectator @a");
+            command("time set day");
         });
-        step(300, () -> cfg(MinimapProfiledConfigOptions.CHUNK_GRID, 0));
+        // Live Crusalis data loads over ~5 s (devForceActive); then park the player on the
+        // first nation's label, with fake war/attack/occupation markers next to it.
+        step(400, () -> {
+            AechronisMapData d = AechronisMapMod.mapData;
+            // A nation-held chunk, so fills, borders and labels are all around.
+            long chunk = d.buildAlphaCache(255).keySet().iterator().nextLong();
+            int x = (net.minecraft.world.level.ChunkPos.getX(chunk) << 4) + 8;
+            int z = (net.minecraft.world.level.ChunkPos.getZ(chunk) << 4) + 8;
+            System.out.printf("[AutoTest] data: nations=%d nodes=%d towns=%d ports=%d borders=%d target=%d,%d%n",
+                    d.nationLabelInfos.size(), d.nodeLabelInfos.size(), d.townLabelInfos.size(), d.ports.size(),
+                    d.nodeBorderLines.size(), x, z);
+            int cx = x >> 4, cz = z >> 4;
+            long now = System.currentTimeMillis();
+            d.warChunks.put(net.minecraft.world.level.ChunkPos.asLong(cx + 2, cz), new AechronisMapData.WarChunk("Test", 0xFF0000, now));
+            d.underAttackChunks.put(net.minecraft.world.level.ChunkPos.asLong(cx + 3, cz), new AechronisMapData.UnderAttackChunk("Test", 0xFFFF00, now));
+            d.territoryDiagonals.keySet().stream().findFirst().ifPresent(tid -> {
+                d.capturedTerritoryIds.add(tid);
+                d.territoryDiagonalColors.put(tid, 0x00FFFF);
+            });
+            command("tp @a " + (x + 0.5) + " 200 " + (z + 0.5) + " 30 60");
+            target[0] = x;
+            target[1] = z;
+        });
+        step(300, () -> {});
         for (boolean north : new boolean[]{true, false}) {
             for (int shape : new int[]{0, 1}) {
                 step(10, () -> {
@@ -52,22 +70,19 @@ public class DevAutoTest implements ClientModInitializer {
                 step(30, () -> shot("mm_" + (north ? "north" : "rotating") + "_" + (shape == 0 ? "square" : "circle")));
             }
         }
-        for (double zoom : new double[]{0.5, 1, 3, 8, 16}) {
-            step(10, () -> {
-                setStatic(GuiMap.class, "destScale", zoom);
-                var session = WorldMapSession.getCurrentSession();
-                mc.setScreen(new GuiMap(null, null, session.getMapProcessor(), mc.getCameraEntity()));
-            });
-            step(100, () -> {
-                Object gui = mc.screen;
-                System.out.printf("[HookSpike] wm zoom=%s cameraX=%s cameraZ=%s scale=%s window=%dx%d%n", zoom,
-                        get(gui, "cameraX"), get(gui, "cameraZ"), get(gui, "scale"),
-                        mc.getWindow().getWidth(), mc.getWindow().getHeight());
-                shot("wm_zoom_" + zoom);
-            });
-            step(5, () -> mc.setScreen(null));
+        for (double zoom : new double[]{0.25, 1, 4, 16}) {
+            worldMap(zoom, "wm_zoom_" + zoom);
         }
-        step(20, mc::stop);
+        // Nether: both maps must be empty of Crusalis data.
+        step(10, () -> command("execute in minecraft:the_nether run tp @a " + target[0] + " 100 " + target[1]));
+        step(200, () -> shot("nether_mm"));
+        worldMap(1, "nether_wm");
+        // -Pautotest=stay: go back to the Overworld test spot and leave the client open.
+        if (Boolean.getBoolean("crusalis.autotest.stay")) {
+            step(20, () -> command("execute in minecraft:overworld run tp @a " + target[0] + " 200 " + target[1]));
+        } else {
+            step(20, mc::stop);
+        }
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null || client.getSingleplayerServer() == null || steps.isEmpty()) return;
@@ -77,6 +92,23 @@ public class DevAutoTest implements ClientModInitializer {
             wait = steps.isEmpty() ? 0 : steps.peek().waitTicks();
         });
         wait = steps.peek().waitTicks();
+    }
+
+    private final int[] target = new int[2];
+
+    private void worldMap(double zoom, String name) {
+        Minecraft mc = Minecraft.getInstance();
+        step(10, () -> {
+            setStatic(GuiMap.class, "destScale", zoom);
+            mc.setScreen(new GuiMap(null, null, WorldMapSession.getCurrentSession().getMapProcessor(), mc.getCameraEntity()));
+        });
+        step(100, () -> shot(name));
+        step(5, () -> mc.setScreen(null));
+    }
+
+    private static void command(String cmd) {
+        var server = Minecraft.getInstance().getSingleplayerServer();
+        server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), cmd));
     }
 
     private void step(int waitTicks, Runnable action) {
@@ -90,17 +122,7 @@ public class DevAutoTest implements ClientModInitializer {
     private static void shot(String name) {
         Minecraft mc = Minecraft.getInstance();
         Screenshot.grab(mc.gameDirectory, "autotest_" + name + ".png", mc.getMainRenderTarget(), 1,
-                msg -> System.out.println("[HookSpike] " + msg.getString()));
-    }
-
-    private static Object get(Object target, String field) {
-        try {
-            Field f = target.getClass().getDeclaredField(field);
-            f.setAccessible(true);
-            return f.get(target);
-        } catch (ReflectiveOperationException e) {
-            return e.toString();
-        }
+                msg -> System.out.println("[AutoTest] " + msg.getString()));
     }
 
     private static void setStatic(Class<?> owner, String field, Object value) {

@@ -1,17 +1,26 @@
-# Xaero render hooks (XaeroPlus-free rendering spike)
+# Xaero render hooks
 
-This is a proof of concept for drawing our overlay straight into Xaero's map framebuffers,
-so the mod only needs Xaero's Minimap and Xaero's World Map, with no XaeroPlus. The spike
-draws two solid quads, red over the player's chunk and blue over chunk 0,0, on both maps.
+The Crusalis overlay draws straight into Xaero's World Map and Minimap, without XaeroPlus.
+It needs Xaero's World Map, and Xaero's Minimap if you want the overlay on the minimap.
+This page records where the hooks sit, how the transforms work and what to watch for when
+Xaero updates.
 
-Spike code:
+Code:
 
-- `src/client/java/.../client/mixin/SpikeWorldMapMixin.java`: world map hook
-- `src/client/java/.../client/mixin/SpikeMinimapMixin.java`: minimap hook
-- `src/client/java/.../spike/HookSpike.java`: shared quad drawing. It does nothing unless
-  the game runs with `-Dcrusalis.hookSpike=true`.
-- `src/client/java/.../spike/HookSpikeAutoTest.java`: a dev-only self-test that runs only
-  with `-Dcrusalis.hookSpike.autotest=true`.
+- `AechronisRenderer`: builds the overlay on the client tick and draws it. It covers fills,
+  lines and labels, plus the Overworld-only check.
+- `client/mixin/AechronisWorldMapMixin`: world map geometry hook and label hook.
+- `client/mixin/AechronisMinimapMixin`: minimap geometry hook.
+- `client/mixin/AechronisMinimapLabelMixin`: minimap label hook.
+- `DevAutoTest`: a dev-only self-test (see Test results).
+
+There are two drawing passes per map:
+
+1. **Geometry pass.** Nation fills, node borders, occupied diagonals, war chunks with their
+   X stripes, and under-attack stripes are drawn into Xaero's map framebuffer, the same way
+   the map tiles are. This means they zoom, rotate and get clipped exactly like the map.
+2. **Label pass.** Labels are drawn after the map framebuffer has been composited to the
+   screen. They stay upright on a rotating minimap and stay crisp at any world map zoom.
 
 ## Versions examined
 
@@ -83,6 +92,18 @@ resampled together with the tiles, so it never drifts against them.
 - Output: `MAIN_TARGET`, which Xaero has rebound to `primaryScaleFBO`.
 - The `endBatch()` we inject before flushes it, so no raw GL is needed.
 
+**Label hook:** inject before `WorldMap.mapElementRenderHandler.render(...)` in
+`GuiMap#render`. Its target is `MapElementRenderHandler#render(GuiMap, BufferSource, ...)`.
+At that point the framebuffer has been composited, and `matrixStack` has just been scaled
+by `this.scale`. Its units are blocks, with the camera (`cameraX/Z`, the `@Shadow` fields) at
+the origin and no Y flip.
+
+- Labels go into the `vanillaRenderBuffers` local. Xaero flushes it right after the map
+  elements, so waypoints and the player arrow stay on top of our labels.
+- Text size matches the XaeroPlus version: `2 * labelScale * clamp(1 / fboScale, 0.1, 1000)`
+  blocks per font pixel. That works out to one font pixel per framebuffer pixel at label
+  scale 0.5.
+
 ## Minimap: `xaero.common.minimap.render.MinimapFBORenderer#renderChunksToFBO(...)`
 
 **Injection point:** inject before the first `XaeroBufferProvider.endBatch()` in
@@ -129,55 +150,87 @@ reason to use the locals. Chunk→pixel scale on the FBO is `16 * zoom`. The vis
 is `radiusBlocks = halfMaxVisibleLength / zoom`, and `halfMaxVisibleLength` includes a √2
 factor when rotating or circular.
 
-**Buffer:** `renderTypeBuffers.getBuffer(xaero.common.graphics.CustomRenderTypes.MAP_CHUNK_OVERLAY)`
+**Buffer:** the overlay uses the World Map's `MAP_COLOR_OVERLAY` here as well
+(position-color, translucent, no culling). Its output target is `MAIN_TARGET`, which is
+`scalingFramebuffer` at this point.
 
-- Pipeline: XaeroLib `RP_POSITION_COLOR_TRANSLUCENT`, which **culls back faces**. Emit quads
-  with the same winding as `xaero.hud.render.util.RenderBufferUtil.addColoredRect`:
-  `(x, y+h)`, `(x+w, y+h)`, `(x+w, y)`, `(x, y)`.
-- Output: `MAIN_TARGET`, which is `scalingFramebuffer` at that point.
+The Minimap's own `MAP_CHUNK_OVERLAY` uses XaeroLib `RP_POSITION_COLOR_TRANSLUCENT`, which
+**culls back faces**. Line quads have arbitrary winding, so some of them would be dropped.
+Zoom is not a local, so the hook derives it as `halfMaxVisibleLength / radiusBlocks`.
+
+**Label hook:** `xaero.common.minimap.render.MinimapRenderer#renderMinimap`. Inject before
+`MinimapElementOverMapRendererHandler.prepareRender(...)`, which is the pass that draws the
+radar icons and player arrow upright over the composited map.
+
+- Pose: the `@Shadow matrixStack` field. It has already been translated to the minimap centre
+  and scaled by `1 / minimapScale`.
+- Locals: `ps`, `pc`, `scaledZoom`, `halfFrame`, `circleShape`, `renderPos`, `mapDimension`,
+  `minimapScale`, `renderTypeBuffers`.
+- Labels are positioned with the same formula as Xaero's
+  `MinimapElementOverMapRendererHandler.translatePosition`:
+  - `x = (ps * offX - pc * offZ) * scaledZoom`
+  - `y = (pc * offX + ps * offZ) * scaledZoom`
+
+  Here `offX/offZ` are block offsets from `renderPos`.
+- A label is skipped when its anchor is outside `halfFrame`. For a circular minimap that is
+  the radius; for a square one it is the half-width.
+- Text scale: one framebuffer pixel equals `minimapScale / 2` units, so a font pixel is
+  `labelScale * minimapScale * max(1, 0.1 * zoom)` units. That matches the old XaeroPlus size.
+- `renderTypeBuffers.endBatch()` comes right after the over-map pass and flushes the text.
+
+**Dimension:** the overlay only draws when the map shows the Overworld
+(`AechronisRenderer.isCrusalisDimension`, ported from PR #2).
+
+- World map: the dimension is `WorldMapSession.getCurrentSession().getMapProcessor()
+  .getMapWorld().getCurrentDimensionId()`.
+- Minimap: the dimension is the `mapDimension` argument or local, which is the dimension of
+  the map being shown, not necessarily the one the player is in.
 
 ## Test results
 
 To reproduce:
 
 ```
-gradlew runClient -PhookSpikeAutotest
+gradlew runClient -Pautotest        # add =stay to keep the client open afterwards
 ```
 
-This needs a save at `run/saves/HookSpike` (any world) and, while the old renderer is still
-in the mod, XaeroPlus in `run/mods`. The self-test:
+This needs a save at `run/saves/HookSpike` (any world). The `runClient` configuration
+passes `-Dcrusalis.devForceActive=true`, which makes the mod fetch and draw live Crusalis
+data in singleplayer. The self-test then:
 
-1. Puts the player in spectator mode at 34.5, 18.5 (chunk 2,1, facing yaw 30).
-2. Turns on Xaero's minimap chunk grid.
-3. Screenshots all 4 minimap modes (north-locked or rotating, square or circle).
-4. Screenshots the world map at 0.5×, 1×, 3×, 8× and 16×, logging `cameraX/Z/scale` for
-   each.
+1. Waits for the data to load.
+2. Parks the player in spectator mode inside a chunk held by a nation.
+3. Adds a fake war chunk (red, with an X) two chunks east, and a fake under-attack chunk
+   (yellow diagonal) three chunks east. It also marks one territory as occupied, with a cyan
+   diagonal.
+4. Screenshots all 4 minimap modes and the world map at 0.25×, 1×, 4× and 16×.
+5. Teleports to the same coordinates in the Nether and screenshots both maps there.
 
-**World map:** a script projects each chunk to `windowW/2 + (blockX - cameraX) * scale`
-and samples pixels 1.5 px inside and outside every edge. Both quads matched at every zoom.
-The only points skipped were those under the player arrow. At 16×, Xaero's own
-mouse-hover chunk highlight frames the red quad exactly.
+Screenshots are written to `run/screenshots/autotest_*.png`.
 
-![world map at 1x, 3x, 8x, 16x](img/spike-worldmap.png)
+These results came from Xaero's World Map 1.46.0 and Minimap 26.5.0, **without XaeroPlus**,
+on 2026-10-02:
 
-**Minimap:** each quad fills exactly one cell of Xaero's own chunk grid in all four modes.
-The quads rotate with the map and are clipped by the circle mask.
+- **World map:** fills, borders and labels show at every zoom. The war X and the under-attack
+  stripe are on the right chunks.
+- **Minimap:** fills, borders, war and attack markers rotate with the map and are clipped by
+  the circle and square masks. Labels stay upright.
+- **Nether:** both maps are empty.
 
-![minimap: north square, north circle, rotating square, rotating circle](img/spike-minimap.png)
+![world map 16x, 0.25x; Nether world map and minimap](img/overlay-worldmap.png)
 
-The same results came out:
+![minimap: north square, north circle, rotating square, rotating circle](img/overlay-minimap.png)
 
-- with XaeroPlus 2.36.3 present, and
-- with XaeroPlus removed. For that run the old `AechronisMapMod` entrypoint and the
-  `xaeroplus` dependency were disabled temporarily, since the current renderer extends
-  XaeroPlus classes.
+A second run **with XaeroPlus 2.36.3 installed** gave the same picture. The two coexist,
+and XaeroPlus's own hook on the same `endBatch` call doesn't interfere.
 
-**Not yet tested:** the Lunar `1.21.11-creative` profile itself. I couldn't drive the
-Lunar launcher from my session, so all of the above ran in the Loom dev client with the
-same mod versions. To check in Lunar:
+Earlier, the hook spike confirmed alignment pixel by pixel: test quads matched Xaero's own
+chunk grid and hover highlight at 0.5× to 16× and in every minimap mode.
 
-1. Put `build/libs/Xaeros Fairplay Nation Overlay-1.0.0.jar` in the profile.
-2. Add `-Dcrusalis.hookSpike=true` to Lunar's JVM arguments.
+**Not tested yet:**
+
+- Lunar itself. All runs used the Loom dev client with the same mod versions.
+- The Fair-Play minimap edition.
 
 ## Gotchas
 
@@ -188,36 +241,21 @@ same mod versions. To check in Lunar:
   update.
 - **Line width:** world map geometry is in blocks at `fboScale` pixels per block, so a
   1-pixel border is `1 / fboScale` blocks wide. On the minimap, 1 pixel is `1 / zoom` blocks.
-- **Text and labels don't belong in these FBO passes.** On the minimap they would rotate
-  with the map, and on the world map they would be resampled. Labels need a second hook:
-  - World map: the map-element pass after the FBO composite (`matrixStack.scale(scale)`,
-    then `WorldMap.mapElementRenderHandler.render(...)`).
-  - Minimap: the over-map renderer handler.
-  
-  That is the next spike if needed.
-- **Culling for performance:** on the minimap, only emit chunks inside `minX..maxX` /
-  `minZ..maxZ`. Those values are in 64-block units, so multiply by 4 for chunks. On the world
-  map, compute the visible range from `cameraX/Z ± windowW/2/scale`.
-- **Fair-Play:** these hooks don't read or change `HudMod.isFairPlay()`. Drawing into the
-  map FBO needs no bypass, so the XaeroPlus fairplay mixin can simply be deleted. The
-  Fair-Play edition (`xaerominimapfair`) isn't installed here, so the minimap hook is
-  **untested on it**. It is believed to share the `xaero.common` / `xaero.hud` classes, but
-  that needs a check.
-- **Build:**
-  - XaeroPlus 2.36.x jars are built with Loom 1.17 (Gradle 9.5), and this project's Loom
-    1.16 refuses them. For that reason XaeroPlus stays compile-only at 2.30.10. This goes
-    away once XaeroPlus is dropped.
-  - Mod Menu 15.0.0 crashes the 1.21.11 dev client, so it is now `modCompileOnly`.
-
-## What blocks the full rewrite
-
-Nothing in the rendering path. Both hooks work with plain Xaero 1.46.0 / 26.5.0. What still
-needs doing:
-
-- `AechronisRenderer` / `XaeroPlusCompat` / `AechronisDrawManagerMixin` extend or reference
-  XaeroPlus classes (`xaeroplus.module.Module`, `DrawFeature`, `DrawManager`). They have to
-  be replaced by our own feature list that is drawn from these two hooks. Then
-  `fabric.mod.json` can drop `xaeroplus` and depend on `xaerominimap` (or
-  `xaerominimapfair`) plus `xaeroworldmap`.
-- Labels and text need the separate post-composite hook described in the gotchas.
-- The Lunar runtime check, and a check against the Fair-Play minimap edition.
+- **Text and labels don't belong in the framebuffer passes.** On the minimap they would
+  rotate with the map, and on the world map they would be resampled. That is why there are
+  separate label hooks.
+- **Culling:** every rectangle, segment and label is checked against the visible block area
+  each frame. On the world map that comes from the `leftBorder`/`rightBorder`/`topBorder`/
+  `bottomBorder` locals; on the minimap it is `xFloored/zFloored ± radiusBlocks`. The live
+  data has about 277k node border segments, so this is a linear scan every frame.
+  - The vertex count stays small, but the scan itself costs CPU.
+  - If profiling shows it matters, bucket the segments by region.
+- **Fair-Play:** the hooks don't read or change `HudMod.isFairPlay()`, so no bypass is
+  needed. The XaeroPlus fairplay mixin is gone. The Fair-Play edition (`xaerominimapfair`) is
+  believed to share the `xaero.common` / `xaero.hud` classes, but that hasn't been tested.
+  `fabric.mod.json` therefore only *suggests* `xaerominimap`. Without a minimap, the minimap
+  mixins find no target and are skipped, with a warning in the log.
+- **Build:** Mod Menu 15.0.0 crashes the 1.21.11 dev client, so it is `modCompileOnly`.
+- **Dev profile:** `run/debug-profile.json` remembers F3 toggles. If vanilla chunk borders
+  are left "always on" there, they show up in the self-test screenshots as coloured lines in
+  the world.
