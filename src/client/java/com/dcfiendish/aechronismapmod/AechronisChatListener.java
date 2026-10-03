@@ -65,8 +65,8 @@ public class AechronisChatListener {
     }
 
     public void register() {
-        ClientReceiveMessageEvents.CHAT.register((message, signedMessage, sender, params, receptionTimestamp) ->
-                handleMessage(message));
+        // System messages only: the plugin's [War] broadcasts are server messages, while
+        // player chat (the CHAT event) could carry a typed fake "[War] ... captured" line.
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (!overlay) handleMessage(message);
         });
@@ -81,7 +81,7 @@ public class AechronisChatListener {
         // actually active" signal AechronisDrawManagerMixin uses, so a coincidental
         // [War]-shaped line on an unrelated server (different plugin, different
         // context) never touches mapData at all.
-        if (AechronisRenderer.ourFeatures.isEmpty()) return;
+        if (!AechronisRenderer.isActive()) return;
 
         try {
             dispatch(text);
@@ -181,11 +181,13 @@ public class AechronisChatListener {
         }
     }
 
-    // Defensive bracket-strip in case a nickname/prefix plugin ever wraps the name
-    // (e.g. "[Tag] Name") — the vanilla broadcast today is a bare username.
+    // Defensive bracket-strip in case a nickname/prefix plugin ever adds a tag
+    // ("[Tag] Name" -> Name) or wraps the name ("[Name]" -> Name) — the vanilla
+    // broadcast today is a bare username.
     private static String extractPlayerName(String name) {
-        if (name.startsWith("[") && name.contains("]"))
-            return name.substring(1, name.indexOf("]")).trim();
-        return name;
+        int close = name.indexOf(']');
+        if (!name.startsWith("[") || close < 0) return name;
+        String after = name.substring(close + 1).trim();
+        return after.isEmpty() ? name.substring(1, close).trim() : after;
     }
 }
