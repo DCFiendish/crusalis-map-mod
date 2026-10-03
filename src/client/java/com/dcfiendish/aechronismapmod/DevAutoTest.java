@@ -118,7 +118,7 @@ public class DevAutoTest implements ClientModInitializer {
     /** isCrusalisAddress must accept crusalis.net and its subdomains only. */
     private static void checkAddresses() {
         String[] yes = {"crusalis.net", "play.crusalis.net", "crusalis.net:25565", "CRUSALIS.NET", "crusalis.net."};
-        String[] no = {"crusalis.net.evil.com", "notcrusalis.net", "167.235.177.45", null, ""};
+        String[] no = {"crusalis.net.evil.com", "notcrusalis.net", "203.0.113.7", null, ""};
         boolean ok = true;
         for (String a : yes) ok &= AechronisMapMod.isCrusalisAddress(a);
         for (String a : no) ok &= !AechronisMapMod.isCrusalisAddress(a);
