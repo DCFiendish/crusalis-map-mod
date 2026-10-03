@@ -8,12 +8,16 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.resolver.ServerAddress;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionResult;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 
 public class AechronisMapMod implements ClientModInitializer {
+	/** Dev client (gradlew runClient). Test-only switches are ignored everywhere else. */
+	static final boolean DEV = FabricLoader.getInstance().isDevelopmentEnvironment();
 
 	public static AechronisMapData mapData;
 	private static AechronisDataFetcher fetcher;
@@ -69,9 +73,10 @@ public class AechronisMapMod implements ClientModInitializer {
 			// singleplayer, or to any other server) keeps drawing the previous session's data.
 			var serverData = client.getCurrentServer();
 			String serverAddress = serverData != null ? serverData.ip : null;
-			boolean onCrusalis = serverAddress != null && serverAddress.toLowerCase().contains("crusalis.net");
+			boolean onCrusalis = isCrusalisAddress(serverAddress);
 			// Dev/testing only: draw live Crusalis data in any world (e.g. the dev client's singleplayer).
-			if (!onCrusalis && Boolean.getBoolean("crusalis.devForceActive")) onCrusalis = true;
+			// Ignored outside the dev environment, so a release jar only ever activates on Crusalis.
+			if (!onCrusalis && DEV && Boolean.getBoolean("crusalis.devForceActive")) onCrusalis = true;
 			if (!onCrusalis) {
 				System.out.println("[Crusalis] Not connected to Crusalis (address=" + serverAddress + "), mod inactive.");
 				AechronisRenderer.setActive(false);
@@ -93,6 +98,17 @@ public class AechronisMapMod implements ClientModInitializer {
 		});
 
 		System.out.println("[Crusalis] Initialized!");
+	}
+
+	/**
+	 * crusalis.net or any subdomain of it (play.crusalis.net, ...), port ignored. A plain
+	 * contains() would also match hosts like crusalis.net.example.com.
+	 */
+	static boolean isCrusalisAddress(String address) {
+		if (address == null) return false;
+		String host = ServerAddress.parseString(address.trim()).getHost().toLowerCase(java.util.Locale.ROOT);
+		if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+		return host.equals("crusalis.net") || host.endsWith(".crusalis.net");
 	}
 
 	/** All -> each node type in the data (alphabetical) -> All. Shown on the action bar. */

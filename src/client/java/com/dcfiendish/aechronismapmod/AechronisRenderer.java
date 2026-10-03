@@ -273,7 +273,7 @@ public final class AechronisRenderer {
         }
         return new Scene(nationFills, nodeBorders, diagonals, warFills, stripes, labels,
                 cfg.showChunkGrid ? cfg.getChunkGridArgb() : 0, cfg.chunkGridWidth, cfg.iconSize,
-                cfg.autoHideBorders ? cfg.hideBordersBelowZoom : 0);
+                cfg.autoHideBorders ? cfg.hideBordersBelowPxPerBlock : 0);
     }
 
     /**

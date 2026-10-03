@@ -23,7 +23,9 @@ public class AechronisConfig implements ConfigData {
     @Category("overlay") public boolean whiteBorders = false;
     /** Hide node borders when the map shows fewer than this many pixels per block. */
     @Category("overlay") public boolean autoHideBorders = true;
-    @Category("overlay") public float hideBordersBelowZoom = 0.5f;
+    // Renamed from hideBordersBelowZoom (default 0.5) so existing configs pick up the new,
+    // further-out default instead of keeping the old cutoff.
+    @Category("overlay") public float hideBordersBelowPxPerBlock = 0.2f;
 
     // ── War ──────────────────────────────────────────────────
     // Occupied diagonal is territory-level; war stripes mark recently captured chunks
@@ -57,6 +59,13 @@ public class AechronisConfig implements ConfigData {
     // ── Getters used by renderer ──────────────────────────────
     public int getNationFillAlpha() { return (int)(nationFillOpacity / 100f * 255); }
     public int getChunkGridArgb() { return ((int)(chunkGridOpacity / 100f * 255) << 24) | (chunkGridColor & 0xFFFFFF); }
+
+    @Override
+    public void validatePostLoad() {
+        // A hand-edited or older config file can leave these null / out of range.
+        if (resourceFilter == null) resourceFilter = "";
+        if (hideBordersBelowPxPerBlock < 0) hideBordersBelowPxPerBlock = 0;
+    }
 
     public static AechronisConfig get() {
         return AutoConfig.getConfigHolder(AechronisConfig.class).getConfig();

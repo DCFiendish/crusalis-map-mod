@@ -29,7 +29,8 @@ public class DevAutoTest implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        if (!Boolean.getBoolean("crusalis.autotest")) return;
+        // Runs commands (gamemode, tp): never outside the dev client.
+        if (!AechronisMapMod.DEV || !Boolean.getBoolean("crusalis.autotest")) return;
         Minecraft mc = Minecraft.getInstance();
 
         step(100, () -> {

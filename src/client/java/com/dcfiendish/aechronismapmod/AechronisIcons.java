@@ -70,6 +70,8 @@ public final class AechronisIcons {
     private static volatile Map<String, Icon> site = Map.of();   // site icon key -> icon
     private static volatile Map<String, String> typeIcons = Map.of();
     private static final Set<String> downloadsTried = new HashSet<>();
+    // Icon keys come from world.json and become cache file names: no separators, no "..".
+    private static final java.util.regex.Pattern SAFE_KEY = java.util.regex.Pattern.compile("[A-Za-z0-9_-][A-Za-z0-9 _.-]{0,63}");
 
     private AechronisIcons() {}
 
@@ -113,6 +115,7 @@ public final class AechronisIcons {
         Set<String> missing = new HashSet<>();
         synchronized (downloadsTried) {
             for (String key : icons.values()) {
+                if (!SAFE_KEY.matcher(key).matches()) continue; // key becomes a file name
                 if (downloadsTried.add(key) && !Files.exists(CACHE.resolve(key + ".png"))) missing.add(key);
             }
         }
@@ -138,7 +141,7 @@ public final class AechronisIcons {
         }
         for (String key : keys) {
             String path = paths.get(key);
-            if (path == null || !path.matches("[A-Za-z0-9_./-]+\\.png")) continue;
+            if (path == null || !path.matches("[A-Za-z0-9_./-]+\\.png") || path.contains("..")) continue;
             try {
                 byte[] png = get(http, path, HttpResponse.BodyHandlers.ofByteArray());
                 Files.createDirectories(CACHE);

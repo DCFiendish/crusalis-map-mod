@@ -47,7 +47,7 @@
   "text.autoconfig.aechronismapmod.option.resourceFilter": "Resource Filter",
   "text.autoconfig.aechronismapmod.option.resourceFilter.tooltip": "Only show node icons and labels for nodes with this type (e.g. wheat, oil, animal farm). Empty = all. The \"Cycle Resource Filter\" key steps through the types.",
   "text.autoconfig.aechronismapmod.option.autoHideBorders": "Auto-Hide Node Borders When Zoomed Out",
-  "text.autoconfig.aechronismapmod.option.hideBordersBelowZoom": "Hide Borders Below Zoom (px per block)",
-  "text.autoconfig.aechronismapmod.option.hideBordersBelowZoom.tooltip": "Node borders disappear when the map shows fewer pixels per block than this (world map 0.25x = 0.25). Default 0.5.",
+  "text.autoconfig.aechronismapmod.option.hideBordersBelowPxPerBlock": "Hide Borders Below Zoom (px per block)",
+  "text.autoconfig.aechronismapmod.option.hideBordersBelowPxPerBlock.tooltip": "Node borders disappear when the map shows fewer pixels per block than this (world map 0.25x = 0.25). Default 0.2: still shown at 0.25x, hidden further out.",
   "key.aechronismapmod.cycle_filter": "Cycle Resource Filter"
 }
