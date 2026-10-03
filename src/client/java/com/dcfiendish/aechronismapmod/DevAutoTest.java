@@ -32,6 +32,7 @@ public class DevAutoTest implements ClientModInitializer {
         // Runs commands (gamemode, tp): never outside the dev client.
         if (!AechronisMapMod.DEV || !Boolean.getBoolean("crusalis.autotest")) return;
         Minecraft mc = Minecraft.getInstance();
+        checkAddresses();
 
         step(100, () -> {
             mc.options.pauseOnLostFocus = false; // the dev window rarely has focus
@@ -72,7 +73,15 @@ public class DevAutoTest implements ClientModInitializer {
                 step(30, () -> shot("mm_" + (north ? "north" : "rotating") + "_" + (shape == 0 ? "square" : "circle")));
             }
         }
-        for (double zoom : new double[]{0.25, 1, 4, 16}) {
+        // Fair-play mode (what Crusalis enforces): Xaero switches it on when a chat message
+        // carries its code. The overlay must keep drawing; cave mode/radar stay Xaero's call.
+        step(10, () -> command("tellraw @a {\"text\":\"\u00a7f\u00a7a\u00a7i\u00a7r\u00a7x\u00a7a\u00a7e\u00a7r\u00a7o\"}"));
+        step(40, () -> {
+            System.out.println("[AutoTest] fair-play active: " + xaero.common.HudMod.INSTANCE.isFairPlay());
+            shot("fairplay_mm");
+        });
+        worldMap(1, "fairplay_wm");
+        for (double zoom : new double[]{0.125, 0.25, 1, 4, 16}) {
             worldMap(zoom, "wm_zoom_" + zoom);
         }
         // Resource filter (normally cycled with its keybind): only wheat nodes.
@@ -105,6 +114,16 @@ public class DevAutoTest implements ClientModInitializer {
     }
 
     private final int[] target = new int[2];
+
+    /** isCrusalisAddress must accept crusalis.net and its subdomains only. */
+    private static void checkAddresses() {
+        String[] yes = {"crusalis.net", "play.crusalis.net", "crusalis.net:25565", "CRUSALIS.NET", "crusalis.net."};
+        String[] no = {"crusalis.net.evil.com", "notcrusalis.net", "167.235.177.45", null, ""};
+        boolean ok = true;
+        for (String a : yes) ok &= AechronisMapMod.isCrusalisAddress(a);
+        for (String a : no) ok &= !AechronisMapMod.isCrusalisAddress(a);
+        System.out.println("[AutoTest] address gate: " + (ok ? "OK" : "FAIL"));
+    }
 
     private void worldMap(double zoom, String name) {
         Minecraft mc = Minecraft.getInstance();

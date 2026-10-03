@@ -2,6 +2,7 @@ package com.dcfiendish.aechronismapmod;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import it.unimi.dsi.fastutil.longs.Long2LongMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -68,10 +69,29 @@ public final class AechronisRenderer {
     record Label(String text, int x, int z, int argb, float scale, List<AechronisIcons.Icon> icons) {}
 
     /** Everything one frame draws, in draw order. Swapped atomically, never mutated. */
-    private record Scene(List<Rect> nationFills, List<Seg> nodeBorders, List<Seg> occupiedDiagonals,
+    /**
+     * Node borders bucketed by 512-block region of their first point, so a frame only walks
+     * the regions in view instead of all ~277k segments (every frame, on both maps).
+     */
+    record Buckets(Long2ObjectOpenHashMap<List<Seg>> byRegion, int maxLength) {
+        static final Buckets EMPTY = new Buckets(new Long2ObjectOpenHashMap<>(), 0);
+        static final int SHIFT = 9;
+
+        static Buckets of(List<Seg> segs) {
+            Long2ObjectOpenHashMap<List<Seg>> map = new Long2ObjectOpenHashMap<>();
+            int max = 0;
+            for (Seg l : segs) {
+                map.computeIfAbsent(ChunkPos.asLong(l.x1 >> SHIFT, l.z1 >> SHIFT), k -> new ArrayList<>()).add(l);
+                max = Math.max(max, Math.max(Math.abs(l.x2 - l.x1), Math.abs(l.z2 - l.z1)));
+            }
+            return new Buckets(map, max);
+        }
+    }
+
+    private record Scene(List<Rect> nationFills, Buckets nodeBorders, List<Seg> occupiedDiagonals,
                          List<Rect> warFills, List<Seg> warStripes, List<Label> labels,
                          int gridArgb, int gridWidthPx, int iconSize, float hideBordersBelow) {
-        static final Scene EMPTY = new Scene(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+        static final Scene EMPTY = new Scene(List.of(), Buckets.EMPTY, List.of(), List.of(), List.of(), List.of(),
                 0, 0, 0, 0);
     }
 
@@ -95,7 +115,7 @@ public final class AechronisRenderer {
     private static int lastBorderCount = -1, lastNodeLabelCount = -1, lastTownLabelCount = -1,
             lastNationLabelCount = -1;
     private static List<Rect> nationFills = List.of();
-    private static List<Seg> nodeBorders = List.of();
+    private static Buckets nodeBorders = Buckets.EMPTY;
     private static List<Label> labels = List.of();
 
     private AechronisRenderer() {}
@@ -199,7 +219,7 @@ public final class AechronisRenderer {
                 borders.add(new Seg(l.x1, l.z1, l.x2, l.z2, color, NODE_BORDER_WIDTH));
             }
         }
-        nodeBorders = List.copyOf(borders);
+        nodeBorders = Buckets.of(borders);
 
         List<Label> out = new ArrayList<>();
         if (sc.everything) {
@@ -358,7 +378,14 @@ public final class AechronisRenderer {
         grid(all, pose, buf, originX, originZ, pxPerBlock, minX, minZ, maxX, maxZ);
         // Zoomed far out, borders merge into a mesh of lines: hide them below the threshold.
         if (pxPerBlock >= s.hideBordersBelow) {
-            lines(s.nodeBorders, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+            // Widen by the longest segment so ones starting outside the view but reaching in count.
+            int sh = Buckets.SHIFT, reach = s.nodeBorders.maxLength();
+            for (int rx = Mth.floor(x0 - reach) >> sh; rx <= (Mth.floor(x1 + reach) >> sh); rx++) {
+                for (int rz = Mth.floor(z0 - reach) >> sh; rz <= (Mth.floor(z1 + reach) >> sh); rz++) {
+                    List<Seg> bucket = s.nodeBorders.byRegion().get(ChunkPos.asLong(rx, rz));
+                    if (bucket != null) lines(bucket, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
+                }
+            }
         }
         lines(s.occupiedDiagonals, pose, buf, originX, originZ, pxPerBlock, x0, z0, x1, z1);
         fills(s.warFills, pose, buf, originX, originZ, x0, z0, x1, z1);
