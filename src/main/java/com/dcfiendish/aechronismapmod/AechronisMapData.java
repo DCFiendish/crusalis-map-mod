@@ -277,12 +277,16 @@ public class AechronisMapData {
                 if (!n.isJsonNull()) nodeTypeNames.add(n.getAsString());
             }
 
-            if (!chunkPairs.isEmpty() && !nodeTypeNames.isEmpty()) {
+            // Borders for EVERY territory with chunks — live world.json has thousands with
+            // an empty "nodes" list, and those were left unbordered before.
+            if (!chunkPairs.isEmpty()) {
                 List<int[]> borders = getBorderLines(chunkPairs);
                 for (int[] line : borders) {
                     newBorderLines.add(new NodeBorderLine(line[0], line[1], line[2], line[3]));
                 }
+            }
 
+            if (!chunkPairs.isEmpty() && !nodeTypeNames.isEmpty()) {
                 // Label-only filtering: drop "basic", keep real resources in order.
                 List<String> labelTypes = new ArrayList<>();
                 for (String t : nodeTypeNames) {
@@ -356,13 +360,19 @@ public class AechronisMapData {
 
         this.townNationMap = new HashMap<>(townNation);
 
+        JsonObject townsObj = towns.has("towns") ? towns.getAsJsonObject("towns") : new JsonObject();
+        // Ownership key per town: its nation, or the town itself when it has none (e.g. a
+        // fresh map with no nations yet), so nationless towns still get filled in their
+        // own town color instead of not rendering at all.
+        Map<String, String> townOwner = new HashMap<>(townNation);
+        for (String townName : townsObj.keySet()) townOwner.putIfAbsent(townName, townName);
+
         Map<String, String> territoryNation = new HashMap<>();
         Set<String> newCapturedFromJson = new HashSet<>();
-        JsonObject townsObj = towns.has("towns") ? towns.getAsJsonObject("towns") : new JsonObject();
         for (Map.Entry<String, JsonElement> e : townsObj.entrySet()) {
             String townName = e.getKey();
             JsonObject town = e.getValue().getAsJsonObject();
-            String nation = townNation.get(townName);
+            String nation = townOwner.get(townName);
             if (town.has("captured") && !town.get("captured").isJsonNull()) {
                 // Skip filler nations' captured lists entirely — Impassable "owns" and
                 // "captures" a lot of terrain by design, and rendering diagonals on all
@@ -412,7 +422,7 @@ public class AechronisMapData {
         for (Map.Entry<String, JsonElement> e : townsObj.entrySet()) {
             String townName = e.getKey();
             JsonObject town = e.getValue().getAsJsonObject();
-            String nation = townNation.get(townName);
+            String nation = townOwner.get(townName);
             if (nation == null || !town.has("residents") || town.get("residents").isJsonNull()) continue;
             for (JsonElement uuidEl : town.getAsJsonArray("residents")) {
                 if (uuidEl.isJsonNull()) continue;
@@ -432,7 +442,7 @@ public class AechronisMapData {
         for (Map.Entry<String, JsonElement> e : townsObj.entrySet()) {
             String townName = e.getKey();
             JsonObject town = e.getValue().getAsJsonObject();
-            String nation = townNation.get(townName);
+            String nation = townOwner.get(townName);
             if (nation == null) continue;
             if (town.has("captured") && !town.get("captured").isJsonNull()) {
                 for (JsonElement tid : town.getAsJsonArray("captured")) {
@@ -471,6 +481,15 @@ public class AechronisMapData {
                         newNationColors.put(nation, rgb(c.get(0).getAsInt(), c.get(1).getAsInt(), c.get(2).getAsInt()));
                     }
                 }
+            }
+        }
+        // Nationless towns are keyed by town name (see townOwner) and use their own color.
+        for (Map.Entry<String, JsonElement> e : townsObj.entrySet()) {
+            if (townNation.containsKey(e.getKey())) continue;
+            JsonElement colorEl = e.getValue().getAsJsonObject().get("color");
+            if (colorEl != null && colorEl.isJsonArray() && colorEl.getAsJsonArray().size() >= 3) {
+                JsonArray c = colorEl.getAsJsonArray();
+                newNationColors.putIfAbsent(e.getKey(), rgb(c.get(0).getAsInt(), c.get(1).getAsInt(), c.get(2).getAsInt()));
             }
         }
         newNationColors.putAll(gistColors);
