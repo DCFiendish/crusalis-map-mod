@@ -81,7 +81,7 @@ public class AechronisChatListener {
         // actually active" signal AechronisDrawManagerMixin uses, so a coincidental
         // [War]-shaped line on an unrelated server (different plugin, different
         // context) never touches mapData at all.
-        if (AechronisRenderer.ourFeatures.isEmpty()) return;
+        if (!AechronisRenderer.isActive()) return;
 
         try {
             dispatch(text);
